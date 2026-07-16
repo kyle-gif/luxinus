@@ -1,0 +1,33 @@
+appId: com.luxinus.app
+productName: Luxinus
+directories:
+  buildResources: build
+  output: release
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintrc,.prettierrc,tsconfig*.json,tailwind.config.js,postcss.config.js}'
+asarUnpack:
+  # Native addons and vendored binaries must remain unpacked so they are loadable
+  # at runtime (sharp/libvips, better-sqlite3, exiftool + perl; onnx in Phase 5).
+  - resources/**
+  - models/**
+  - '**/node_modules/sharp/**'
+  - '**/node_modules/@img/**'
+  - '**/node_modules/better-sqlite3/**'
+  - '**/node_modules/exiftool-vendored*/**'
+win:
+  target:
+    - nsis
+  artifactName: ${productName}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target:
+    - dmg
+  category: public.app-category.photography
+  artifactName: ${productName}-${version}.${ext}
+# Local-only app: no publish provider configured. Optional update checks only.
+publish: null

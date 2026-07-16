@@ -1,0 +1,26 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+.DS_Store
+
+# AI model files are large and never committed. Placed manually in models/ or
+# downloaded on first launch with explicit user consent.
+models/*
+!models/.gitkeep
+
+# Local thumbnail / sidecar caches
+.cache/
+*.sqlite
+*.sqlite-journal
+
+# OMC / tooling state
+.omc/
+.omo/
+
+# Design-review screenshots (local only)
+design-review/
+
+# AI models (large; downloaded/placed locally, never committed or bundled)
+models/*.onnx

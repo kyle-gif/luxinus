@@ -1,0 +1,408 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Luxinus — a local, on-device darkroom.
+
+  Type carries the identity: Bricolage Grotesque (a characterful display
+  grotesque) sets the brand and section heads; Hanken Grotesk runs the UI;
+  Geist Mono handles the instrument readouts. Pink (#FF2D78) is a *signal*, used
+  where something is live/selected — not a glow smeared on every edge. The ground
+  is an ink near-black with a faint cool bias, layered by elevation rather than
+  drowned in glass. The one indulgence — the WebGL liquid glass — is a signature,
+  not the whole room.
+*/
+
+@font-face {
+  font-family: 'Bricolage Grotesque';
+  src: url('./assets/fonts/bricolage.woff2') format('woff2');
+  font-weight: 300 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Hanken Grotesk';
+  src: url('./assets/fonts/hanken.woff2') format('woff2');
+  font-weight: 300 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('./assets/fonts/geistmono.woff2') format('woff2');
+  font-weight: 400 600;
+  font-display: swap;
+}
+
+:root {
+  --lx-base: #08090d; /* ink near-black, faint cool-violet bias */
+  --lx-surface: #14151c; /* elevated work surface */
+  --lx-surface-2: #1c1d26;
+  --lx-ink: #f7f4fb; /* brighter for crisp hierarchy */
+  --lx-muted: #bcb7c8; /* readable secondary text (was too dim) */
+  --lx-faint: #8a8796; /* still quiet, but legible */
+  --lx-accent: #ff2d78;
+  --lx-accent-soft: #ff85b5;
+  --lx-accent-line: rgba(255, 45, 120, 0.6);
+  --lx-accent-tint: rgba(255, 45, 120, 0.1);
+  --lx-glow: rgba(255, 45, 120, 0.35);
+  --lx-hairline: rgba(255, 255, 255, 0.1);
+  --lx-hairline-strong: rgba(255, 255, 255, 0.17);
+  /* Elevation: a whisper of top-light gives panels dimension without gloss. */
+  --lx-elev: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 42%);
+  --lx-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --lx-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background-color: var(--lx-base);
+    color: var(--lx-ink);
+    font-family: 'Hanken Grotesk', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  /* Display voice — characterful grotesque, tight tracking. */
+  .lx-display {
+    font-family: 'Bricolage Grotesque', 'Hanken Grotesk', sans-serif;
+    letter-spacing: -0.02em;
+  }
+
+  /* Instrument readouts. */
+  .lx-num {
+    font-family: 'Geist Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  /* Micro label — small, tracked, but not shouty all-caps everywhere. */
+  .lx-eyebrow {
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--lx-faint);
+  }
+
+  :focus-visible {
+    outline: 1.5px solid var(--lx-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  /*
+    Modern frosted glass — flat and matte, not Aero-glossy. The depth comes from
+    a heavy, evenly-frosted blur and one hairline edge, NOT from shiny gradients
+    or a specular streak. High translucency + high text contrast is the current
+    "liquid glass" idiom (visionOS / macOS Tahoe), the opposite of Windows 7 gloss.
+  */
+  .lx-glass {
+    position: relative;
+    background: rgba(22, 22, 27, 0.5);
+    /* Frosted lensing: blur + a lift in saturation/brightness reads as light
+       concentrating through glass. (Chromium ignores url() on backdrop-filter,
+       so the refraction lives on the rim below rather than the whole backdrop.) */
+    backdrop-filter: blur(16px) saturate(1.5) brightness(1.06);
+    -webkit-backdrop-filter: blur(16px) saturate(1.5) brightness(1.06);
+    border: 1px solid var(--lx-hairline);
+    border-radius: 18px;
+    box-shadow:
+      0 20px 55px -22px rgba(0, 0, 0, 0.72),
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.07),
+      /* chromatic aberration: warm edge one side, cool the other */
+      inset 1px 0 0 rgba(255, 45, 120, 0.16),
+      inset -1px 0 0 rgba(90, 170, 255, 0.16);
+    overflow: hidden;
+  }
+  /* Chromatic dispersion rim: a magenta→cyan fringe that the SVG displacement
+     filter makes shimmer, so the glass edge splits light by wavelength like a
+     real refractive prism. */
+  .lx-glass::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1.5px;
+    background: linear-gradient(
+      135deg,
+      rgba(255, 45, 120, 0.6) 0%,
+      rgba(255, 120, 170, 0.12) 24%,
+      rgba(255, 255, 255, 0.06) 46%,
+      rgba(120, 200, 255, 0.16) 68%,
+      rgba(90, 160, 255, 0.55) 100%
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    filter: url(#lx-liquid);
+    opacity: 0.8;
+    pointer-events: none;
+  }
+  /* When the WebGL liquid-glass material is active, the panel is transparent DOM
+     laid over it — drop the CSS glass so the shader shows through. Only the drop
+     shadow (float) and a whisper-thin border remain. */
+  :root[data-webgl='ok'] .lx-glass {
+    background: var(--lx-elev);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: rgba(255, 255, 255, 0.09);
+    box-shadow:
+      0 28px 70px -28px rgba(0, 0, 0, 0.8),
+      inset 0 1px 0 rgba(255, 255, 255, 0.09),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  }
+  :root[data-webgl='ok'] .lx-glass::before,
+  :root[data-webgl='ok'] .lx-glass::after {
+    display: none;
+  }
+
+  /* Barely-there grain for a filmic, non-plastic surface — no shine. */
+  .lx-glass::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.02;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+  }
+  .lx-glass > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Drag regions for the frameless window (macOS traffic lights sit on the bar). */
+  .lx-drag {
+    -webkit-app-region: drag;
+  }
+  .lx-no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  /*
+    Buttons: dark by default. PINK ONLY ON THE BORDER for the primary action —
+    a hairline that ignites into a glow on hover. Never a filled pink block.
+  */
+  .lx-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 10px;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--lx-ink);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--lx-hairline);
+    transition: border-color 0.18s ease, box-shadow 0.25s ease, background-color 0.18s ease,
+      color 0.18s ease, transform 0.4s var(--lx-spring);
+    will-change: transform;
+  }
+  .lx-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.07);
+    border-color: var(--lx-hairline-strong);
+    transform: translateY(-1px);
+  }
+  /* Squish on press, then spring back. */
+  .lx-btn:active:not(:disabled) {
+    transform: scale(0.93);
+    transition-duration: 0.08s;
+  }
+  .lx-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  /* Primary = pink hairline + pink label, glass body. Border-driven accent. */
+  .lx-btn-accent {
+    color: var(--lx-accent-soft);
+    background: var(--lx-accent-tint);
+    border-color: var(--lx-accent-line);
+  }
+  .lx-btn-accent:hover:not(:disabled) {
+    background: rgba(255, 45, 120, 0.14);
+    border-color: var(--lx-accent);
+    color: var(--lx-accent-soft);
+  }
+
+  /* Soft/squishy scale for interactive tiles (thumbnails, toggle segments). */
+  .lx-squish {
+    transition: transform 0.4s var(--lx-spring), border-color 0.18s ease, box-shadow 0.25s ease;
+  }
+  .lx-squish:hover {
+    transform: scale(1.045);
+  }
+  .lx-squish:active {
+    transform: scale(0.93);
+    transition-duration: 0.09s;
+  }
+
+  /* Section header: eyebrow label + a hairline rule that runs to the edge. */
+  .lx-rule {
+    height: 1px;
+    background: linear-gradient(90deg, var(--lx-accent-line), transparent 60%);
+  }
+
+  /* Recessed, soft groove — deeper concave read. */
+  .lx-groove {
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.3));
+    box-shadow:
+      inset 0 2px 3px rgba(0, 0, 0, 0.7),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  /* Filled segment: a thin solid pink line — precise, not a glowing tube. */
+  .lx-fill {
+    background: var(--lx-accent);
+    box-shadow: 0 0 3px -1px rgba(255, 45, 120, 0.5);
+  }
+}
+
+/* Mode switch pill — a neon capsule that stretches toward its target while it
+   slides, then settles with a springy overshoot. */
+.lx-switch-pill {
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(255, 45, 120, 0.9), rgba(224, 24, 98, 0.85));
+  box-shadow:
+    0 0 14px 0 rgba(255, 45, 120, 0.6),
+    0 0 4px rgba(255, 45, 120, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition:
+    left 0.5s var(--lx-spring),
+    transform 0.28s var(--lx-spring),
+    box-shadow 0.3s ease;
+}
+.lx-switch-pill[data-stretch='true'] {
+  box-shadow:
+    0 0 22px 2px rgba(255, 45, 120, 0.85),
+    0 0 8px rgba(255, 45, 120, 1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* Custom liquid slider — a glossy gel thumb that grows on hover and squishes
+   (scale 1.35×0.78) while dragged, on a recessed glass groove with a liquid fill. */
+.lx-slider {
+  outline: none;
+}
+.lx-thumb {
+  transform: translate(-50%, -50%);
+  z-index: 10;
+}
+.lx-thumb-bead {
+  border-radius: 2px;
+  /* A precise flat marker (a playhead tick), not a glowing bead. Light bar on a
+     dark groove, reading crisp against the pink fill. No neon halo. */
+  background: var(--lx-ink);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.65), 0 0 0 0.5px rgba(0, 0, 0, 0.4);
+  transition: transform 0.3s var(--lx-spring), background-color 0.18s ease;
+}
+.lx-slider:hover .lx-thumb-bead {
+  background: #ffffff;
+  transform: scaleY(1.12);
+}
+.lx-slider:focus-visible .lx-thumb-bead {
+  box-shadow: 0 0 0 2px var(--lx-accent);
+}
+.lx-slider[data-drag='true'] .lx-thumb-bead {
+  transform: scaleY(1.22);
+  background: #ffffff;
+  transition-duration: 0.1s;
+}
+
+/* Round knob for gradient (colour) sliders — a crisp white puck riding the
+   colour track, dark-ringed so it reads on any hue. */
+.lx-thumb-knob {
+  border-radius: 9999px;
+  background: #ffffff;
+  box-shadow:
+    0 0 0 1.5px rgba(0, 0, 0, 0.55),
+    0 1px 4px rgba(0, 0, 0, 0.6);
+  transition: transform 0.3s var(--lx-spring);
+}
+.lx-slider:hover .lx-thumb-knob {
+  transform: scale(1.12);
+}
+.lx-slider:focus-visible .lx-thumb-knob {
+  box-shadow: 0 0 0 2px var(--lx-accent), 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+.lx-slider[data-drag='true'] .lx-thumb-knob {
+  transform: scale(1.2);
+  transition-duration: 0.1s;
+}
+
+/* Slider value bubble: springs in above the thumb while hovering/dragging. */
+.lx-bubble {
+  transform: translateX(-50%) translateY(4px) scale(0.85);
+  opacity: 0;
+  transition: opacity 0.18s ease, transform 0.35s var(--lx-spring);
+}
+.group:hover > .lx-bubble,
+.group:focus-within > .lx-bubble,
+.lx-slider[data-drag='true'] .lx-bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+
+/* Content transitions — a soft rise-in used when panels/workspaces mount. */
+@keyframes lx-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.lx-fade-in {
+  animation: lx-fade-in 0.3s var(--lx-ease) both;
+}
+@keyframes lx-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.lx-pop-in {
+  animation: lx-pop-in 0.34s var(--lx-spring) both;
+}
+
+/* Thin scrollbars. */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
