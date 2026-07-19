@@ -5,8 +5,11 @@ import { Slider } from '../ui/Slider'
 import { Histogram } from '../ui/Histogram'
 import { ToneCurve } from '../ui/ToneCurve'
 import { HslMixer } from '../ui/HslMixer'
+import { ColorGradePanel } from '../ui/ColorGradePanel'
 import { MasksPanel } from '../ui/MasksPanel'
 import { PresetsPanel } from '../ui/PresetsPanel'
+import { HistoryPanel } from '../ui/HistoryPanel'
+import { ResizeHandle } from '../ui/ResizeHandle'
 import { autoEnhance, computeAutoEnhance } from '../../lib/autoEnhance'
 import type { EditState } from '../../types'
 
@@ -24,12 +27,22 @@ export function EditPanel(): JSX.Element {
   const canRedo = useStore((s) => s.redoStack.length > 0)
   const maskMode = useStore((s) => s.maskMode)
   const setMaskMode = useStore((s) => s.setMaskMode)
+  const panelWidth = useStore((s) => s.panelWidth)
+  const setPanelWidth = useStore((s) => s.setPanelWidth)
 
   const set = (key: keyof EditState) => (v: number) => setEdit({ [key]: v })
   const title = maskMode ? 'Masking' : mode === 'simple' ? 'Adjust' : 'Develop'
 
   return (
-    <aside className="lx-glass absolute bottom-0 right-0 top-12 z-20 flex w-80 flex-col rounded-none border-y-0 border-r-0">
+    <aside
+      className="lx-glass lx-fade-in absolute bottom-0 right-0 top-12 z-20 flex flex-col rounded-none border-y-0 border-r-0"
+      style={{ width: panelWidth, animationDelay: '90ms' }}
+    >
+      <ResizeHandle
+        side="left"
+        compute={(x) => (isNaN(x) ? 320 : window.innerWidth - x)}
+        onResize={setPanelWidth}
+      />
       <div className="flex items-center justify-between px-4 pt-3">
         <span className="lx-display text-[13px] font-semibold text-ink">{title}</span>
         <div className="flex items-center gap-1">
@@ -217,6 +230,10 @@ function ExpertControls({
         <HslMixer />
       </Section>
 
+      <Section title="Color Grading">
+        <ColorGradePanel />
+      </Section>
+
       <Section title="Detail">
         <Slider label="Texture" value={edit.texture} onChange={set('texture')} />
         <Slider label="Clarity" value={edit.clarity} onChange={set('clarity')} />
@@ -236,6 +253,10 @@ function ExpertControls({
 
       <Section title="Presets" defaultOpen>
         <PresetsPanel />
+      </Section>
+
+      <Section title="Snapshots & History">
+        <HistoryPanel />
       </Section>
     </>
   )

@@ -119,9 +119,9 @@
     box-shadow:
       0 20px 55px -22px rgba(0, 0, 0, 0.72),
       inset 0 0.5px 0 rgba(255, 255, 255, 0.07),
-      /* chromatic aberration: warm edge one side, cool the other */
-      inset 1px 0 0 rgba(255, 45, 120, 0.16),
-      inset -1px 0 0 rgba(90, 170, 255, 0.16);
+      /* a barely-there warm/cool edge — a hint, not a rainbow fringe */
+      inset 1px 0 0 rgba(255, 45, 120, 0.08),
+      inset -1px 0 0 rgba(90, 170, 255, 0.08);
     overflow: hidden;
   }
   /* Chromatic dispersion rim: a magenta→cyan fringe that the SVG displacement
@@ -264,32 +264,28 @@
       inset 0 -1px 0 rgba(255, 255, 255, 0.06);
   }
 
-  /* Filled segment: a thin solid pink line — precise, not a glowing tube. */
+  /* Filled segment: a thin solid pink line — precise, no halo. */
   .lx-fill {
     background: var(--lx-accent);
-    box-shadow: 0 0 3px -1px rgba(255, 45, 120, 0.5);
   }
 }
 
-/* Mode switch pill — a neon capsule that stretches toward its target while it
-   slides, then settles with a springy overshoot. */
+/* Mode switch pill — a neutral RAISED segment (top-light + soft drop), not a
+   neon capsule. It slides and stretches slightly toward its target; the pink
+   lives in the active label, not here. Restraint over glow. */
 .lx-switch-pill {
   border-radius: 9999px;
-  background: linear-gradient(180deg, rgba(255, 45, 120, 0.9), rgba(224, 24, 98, 0.85));
+  background: rgba(255, 255, 255, 0.075);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow:
-    0 0 14px 0 rgba(255, 45, 120, 0.6),
-    0 0 4px rgba(255, 45, 120, 0.8),
-    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.4);
   transition:
-    left 0.5s var(--lx-spring),
-    transform 0.28s var(--lx-spring),
-    box-shadow 0.3s ease;
+    left 0.42s var(--lx-ease),
+    transform 0.28s var(--lx-spring);
 }
 .lx-switch-pill[data-stretch='true'] {
-  box-shadow:
-    0 0 22px 2px rgba(255, 45, 120, 0.85),
-    0 0 8px rgba(255, 45, 120, 1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* Custom liquid slider — a glossy gel thumb that grows on hover and squishes

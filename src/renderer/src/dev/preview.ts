@@ -98,6 +98,21 @@ export function enablePreview(): void {
     useStore.getState().selectMask('b1')
   }
 
+  // ?grade — seed a teal-shadow / warm-highlight color grade to verify the
+  // color-grading shader pass + wheels (dev only).
+  if (search.includes('grade')) {
+    useStore.getState().setEdit({
+      colorGrade: {
+        shadows: { hue: 200, sat: 45, lum: -10 },
+        midtones: { hue: 40, sat: 20, lum: 0 },
+        highlights: { hue: 45, sat: 40, lum: 8 },
+        global: { hue: 0, sat: 0, lum: 0 },
+        blending: 50,
+        balance: 0
+      }
+    })
+  }
+
   // Seed sample presets so the Presets panel + thumbnails render in browser preview.
   {
     const d = defaultEditState()

@@ -5,6 +5,8 @@ import {
   defaultEditState,
   isEdited,
   zeroMaskAdjust,
+  type ColorGradeRegion,
+  type ColorGradeRegionKey,
   type CurveChannel,
   type CurvePoint,
   type EditState,
@@ -27,6 +29,14 @@ function webpToUrl(bytes: Uint8Array): string {
 }
 
 const clampWb = (v: number): number => Math.round(Math.min(100, Math.max(-100, v)))
+
+// A named saved edit state for a photo (Lightroom-style snapshot).
+export interface Snapshot {
+  id: string
+  name: string
+  edit: EditState
+  createdAt: string
+}
 
 function loadImageEl(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -54,12 +64,40 @@ function scheduleSave(filePath: string, edit: EditState): void {
   )
 }
 
+// Resizable panel widths (px), persisted between sessions.
+const DRAWER_MIN = 220
+const DRAWER_MAX = 460
+const PANEL_MIN = 288
+const PANEL_MAX = 560
+const clampPx = (v: number, lo: number, hi: number): number => Math.round(Math.min(hi, Math.max(lo, v)))
+function readWidth(key: string, fallback: number): number {
+  try {
+    const v = Number(localStorage.getItem(key))
+    return Number.isFinite(v) && v > 0 ? v : fallback
+  } catch {
+    return fallback
+  }
+}
+function persistWidth(key: string, v: number): void {
+  try {
+    localStorage.setItem(key, String(v))
+  } catch {
+    /* storage unavailable — widths stay session-only */
+  }
+}
+
 interface LuxinusState {
   // UI
   mode: EditorMode
   drawerCollapsed: boolean
   setMode: (mode: EditorMode) => void
   toggleDrawer: () => void
+
+  // Resizable layout — the drawer (left) and edit panel (right) widths, in px.
+  drawerWidth: number
+  panelWidth: number
+  setDrawerWidth: (w: number) => void
+  setPanelWidth: (w: number) => void
 
   // Crop editing (transient UI state — the crop itself lives in edit.crop)
   cropMode: boolean
@@ -115,6 +153,16 @@ interface LuxinusState {
   setRating: (filePath: string, rating: number) => void
   setFlag: (filePath: string, flagged: boolean) => void
 
+  // Multi-selection for batch operations (the active photo — selectedPath — is
+  // always a member). Cmd/Ctrl toggles, Shift extends a range.
+  selection: Set<string>
+  pickPhoto: (filePath: string, mods: { meta: boolean; shift: boolean }) => void
+  clearSelection: () => void
+  // Copy the current develop settings (minus framing) onto every selected photo's
+  // sidecar. Returns how many were written.
+  syncing: boolean
+  syncEditToSelection: () => Promise<number>
+
   // Proxy (selected photo, rendered on the stage)
   proxy: ProxyState
 
@@ -122,6 +170,8 @@ interface LuxinusState {
   edit: EditState
   setEdit: (patch: Partial<EditState>) => void
   setHsl: (band: HslBand, patch: Partial<{ hue: number; sat: number; lum: number }>) => void
+  setColorGrade: (region: ColorGradeRegionKey, patch: Partial<ColorGradeRegion>) => void
+  setColorGradeParam: (patch: Partial<{ blending: number; balance: number }>) => void
   setCurve: (channel: CurveChannel, points: CurvePoint[]) => void
   applyEdit: (edit: EditState) => void // wholesale replace (Auto Enhance)
   resetEdit: () => void
@@ -136,6 +186,16 @@ interface LuxinusState {
   redoStack: EditState[]
   undo: () => void
   redo: () => void
+  // Jump to an absolute point in the combined history timeline (index into
+  // [...undoStack, edit, ...redoStack reversed]).
+  jumpToHistory: (index: number) => void
+
+  // Snapshots — named saved edit states for the current photo (session-scoped).
+  snapshots: Snapshot[]
+  saveSnapshot: (name: string) => void
+  applySnapshot: (id: string) => void
+  renameSnapshot: (id: string, name: string) => void
+  deleteSnapshot: (id: string) => void
 
   // AI denoise — a restored copy of the current proxy the develop shader blends
   // in by the Denoise slider. Computed on demand (slow), cached per photo.
@@ -204,6 +264,9 @@ export const useStore = create<LuxinusState>((set, get) => {
     set({ undoStack: [], redoStack: [] })
   }
 
+  // Snapshots persist per-photo for the life of the session.
+  const snapshotStore = new Map<string, Snapshot[]>()
+
   // Write an edit into state: recompute the edited badge + schedule a save.
   function writeEdit(edit: EditState): void {
     const path = get().selectedPath
@@ -229,6 +292,19 @@ export const useStore = create<LuxinusState>((set, get) => {
     drawerCollapsed: false,
     setMode: (mode) => set({ mode }),
     toggleDrawer: () => set((s) => ({ drawerCollapsed: !s.drawerCollapsed })),
+
+    drawerWidth: readWidth('lx-drawer-w', 288),
+    panelWidth: readWidth('lx-panel-w', 320),
+    setDrawerWidth: (w) => {
+      const v = clampPx(w, DRAWER_MIN, DRAWER_MAX)
+      persistWidth('lx-drawer-w', v)
+      set({ drawerWidth: v })
+    },
+    setPanelWidth: (w) => {
+      const v = clampPx(w, PANEL_MIN, PANEL_MAX)
+      persistWidth('lx-panel-w', v)
+      set({ panelWidth: v })
+    },
 
     cropMode: false,
     cropAspect: null,
@@ -367,6 +443,7 @@ export const useStore = create<LuxinusState>((set, get) => {
           folderPath: res.folderPath,
           photos,
           selectedPath: null,
+          selection: new Set(),
           filter: { ...DEFAULT_FILTER },
           proxy: { ...IDLE_PROXY },
           edit: defaultEditState(),
@@ -399,11 +476,13 @@ export const useStore = create<LuxinusState>((set, get) => {
       if (cur.proxy.url) URL.revokeObjectURL(cur.proxy.url)
       set({
         selectedPath: filePath,
+        selection: new Set([filePath]),
         edit: defaultEditState(),
         proxy: { filePath, url: null, status: 'loading', message: null },
         cropMode: false,
         maskMode: false,
         selectedMaskId: null,
+        snapshots: snapshotStore.get(filePath) ?? [],
         denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null }
       })
       resetHistory(defaultEditState())
@@ -453,6 +532,71 @@ export const useStore = create<LuxinusState>((set, get) => {
       window.luxinus?.library.setFlag(filePath, flagged).catch(() => {})
     },
 
+    selection: new Set(),
+    pickPhoto: (filePath, mods) => {
+      const s = get()
+      if (mods.shift && s.selectedPath) {
+        // Range-select from the active photo to the clicked one (filtered order).
+        const order = selectFilteredPhotos(s).map((p) => p.filePath)
+        const a = order.indexOf(s.selectedPath)
+        const b = order.indexOf(filePath)
+        if (a >= 0 && b >= 0) {
+          const [lo, hi] = a < b ? [a, b] : [b, a]
+          const next = new Set(order.slice(lo, hi + 1))
+          next.add(s.selectedPath)
+          set({ selection: next })
+          return
+        }
+      }
+      if (mods.meta) {
+        // Toggle membership without changing the active (source) photo.
+        const next = new Set(s.selection)
+        if (next.has(filePath) && filePath !== s.selectedPath) next.delete(filePath)
+        else next.add(filePath)
+        if (s.selectedPath) next.add(s.selectedPath)
+        set({ selection: next })
+        return
+      }
+      // Plain click: single-select + make active.
+      get().selectPhoto(filePath)
+    },
+    clearSelection: () => {
+      const p = get().selectedPath
+      set({ selection: p ? new Set([p]) : new Set() })
+    },
+    syncing: false,
+    syncEditToSelection: async () => {
+      const s = get()
+      if (!window.luxinus || !s.selectedPath) return 0
+      // Everything but this photo's own framing — a look, not a crop.
+      const look = { ...s.edit, crop: null, rotate: 0, flipH: false, flipV: false }
+      const targets = [...s.selection].filter((p) => p !== s.selectedPath)
+      if (targets.length === 0) return 0
+      set({ syncing: true })
+      try {
+        const written = new Set<string>()
+        await Promise.all(
+          targets.map(async (path) => {
+            // Preserve each target's existing framing if it has a sidecar.
+            const existing = await window.luxinus.edits.load(path).catch(() => null)
+            const merged = existing
+              ? { ...look, crop: existing.crop, rotate: existing.rotate, flipH: existing.flipH, flipV: existing.flipV }
+              : look
+            const ok = await window.luxinus.edits.save(path, merged).catch(() => false)
+            if (ok) written.add(path)
+          })
+        )
+        set((st) => {
+          const badge = new Set(st.editedPaths)
+          for (const p of written) badge.add(p)
+          return { editedPaths: badge }
+        })
+        return written.size
+      } finally {
+        set({ syncing: false })
+      }
+    },
+
     proxy: { ...IDLE_PROXY },
 
     edit: defaultEditState(),
@@ -460,6 +604,17 @@ export const useStore = create<LuxinusState>((set, get) => {
     setHsl: (band, patch) => {
       const e = get().edit
       commitEdit({ ...e, hsl: { ...e.hsl, [band]: { ...e.hsl[band], ...patch } } })
+    },
+    setColorGrade: (region, patch) => {
+      const e = get().edit
+      commitEdit({
+        ...e,
+        colorGrade: { ...e.colorGrade, [region]: { ...e.colorGrade[region], ...patch } }
+      })
+    },
+    setColorGradeParam: (patch) => {
+      const e = get().edit
+      commitEdit({ ...e, colorGrade: { ...e.colorGrade, ...patch } })
     },
     setCurve: (channel, points) => {
       const e = get().edit
@@ -496,6 +651,54 @@ export const useStore = create<LuxinusState>((set, get) => {
       set((st) => ({ redoStack: st.redoStack.slice(0, -1), undoStack: [...st.undoStack, st.edit] }))
       histBaseline = next
       writeEdit(next)
+    },
+    jumpToHistory: (index) => {
+      checkpointNow() // flush any in-flight drag so the timeline is complete
+      const s = get()
+      const timeline = [...s.undoStack, s.edit, ...[...s.redoStack].reverse()]
+      const i = Math.max(0, Math.min(timeline.length - 1, index))
+      const target = timeline[i]
+      const undoStack = timeline.slice(0, i)
+      const redoStack = timeline.slice(i + 1).reverse()
+      set({ undoStack, redoStack })
+      histBaseline = target
+      writeEdit(target)
+    },
+
+    snapshots: [],
+    saveSnapshot: (name) => {
+      const path = get().selectedPath
+      if (!path) return
+      const snap: Snapshot = {
+        id: crypto.randomUUID(),
+        name: name.trim() || `Snapshot ${(snapshotStore.get(path)?.length ?? 0) + 1}`,
+        edit: get().edit,
+        createdAt: new Date().toISOString()
+      }
+      const list = [...(snapshotStore.get(path) ?? []), snap]
+      snapshotStore.set(path, list)
+      set({ snapshots: list })
+    },
+    applySnapshot: (id) => {
+      const snap = get().snapshots.find((x) => x.id === id)
+      if (!snap) return
+      // Keep the current framing (like paste/preset), swap in the saved look.
+      const e = get().edit
+      commitEdit({ ...snap.edit, crop: e.crop, rotate: e.rotate, flipH: e.flipH, flipV: e.flipV })
+    },
+    renameSnapshot: (id, name) => {
+      const path = get().selectedPath
+      if (!path) return
+      const list = (snapshotStore.get(path) ?? []).map((x) => (x.id === id ? { ...x, name } : x))
+      snapshotStore.set(path, list)
+      set({ snapshots: list })
+    },
+    deleteSnapshot: (id) => {
+      const path = get().selectedPath
+      if (!path) return
+      const list = (snapshotStore.get(path) ?? []).filter((x) => x.id !== id)
+      snapshotStore.set(path, list)
+      set({ snapshots: list })
     },
 
     denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null },

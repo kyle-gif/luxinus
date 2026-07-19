@@ -16,7 +16,7 @@ export function TopBar(): JSX.Element {
 
   return (
     <header
-      className="lx-glass lx-drag absolute inset-x-0 top-0 z-30 flex h-12 items-center justify-between rounded-none border-x-0 border-t-0 pr-4"
+      className="lx-glass lx-drag lx-fade-in absolute inset-x-0 top-0 z-30 flex h-12 items-center justify-between rounded-none border-x-0 border-t-0 pr-4"
       style={{ paddingLeft: isMac ? 84 : 16 }}
     >
       {/* Logo */}

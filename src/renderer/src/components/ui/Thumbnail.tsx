@@ -4,21 +4,23 @@ import type { PhotoVM } from '../../types'
 interface ThumbnailProps {
   photo: PhotoVM
   active: boolean
-  onClick: () => void
+  /** In the multi-selection set (for batch operations). */
+  selected?: boolean
+  onClick: (e: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }) => void
   className?: string
 }
 
 // A single library thumbnail. Shows the decoded webp once it streams in;
-// otherwise a subtle placeholder with the filename. Active = pink hairline + tick.
-// Rating (stars) and flag render as small read-only indicators.
-export function Thumbnail({ photo, active, onClick, className = '' }: ThumbnailProps): JSX.Element {
+// otherwise a subtle placeholder with the filename. Active = pink hairline + tick;
+// multi-selected = softer pink ring + tick. Rating/flag are small indicators.
+export function Thumbnail({ photo, active, selected = false, onClick, className = '' }: ThumbnailProps): JSX.Element {
   const edited = useStore((s) => s.editedPaths.has(photo.filePath))
   return (
     <button
-      onClick={onClick}
+      onClick={(e) => onClick({ metaKey: e.metaKey, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey })}
       title={photo.fileName}
       className={`lx-squish group relative overflow-hidden rounded-md border ${
-        active ? 'border-accent' : 'border-glass hover:border-white/25'
+        active ? 'border-accent' : selected ? 'border-accent/45' : 'border-glass hover:border-white/25'
       } ${className}`}
     >
       {photo.thumbUrl ? (
@@ -63,6 +65,13 @@ export function Thumbnail({ photo, active, onClick, className = '' }: ThumbnailP
       </div>
 
       {active && <span className="absolute inset-x-0 top-0 h-[2px] bg-accent" />}
+
+      {/* Multi-selection tick (shown when part of a batch selection, not active). */}
+      {selected && !active && (
+        <span className="absolute left-1 top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border border-accent/70 bg-black/60 text-[8px] text-accent-soft">
+          ✓
+        </span>
+      )}
     </button>
   )
 }

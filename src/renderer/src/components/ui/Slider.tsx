@@ -132,7 +132,7 @@ export function Slider({
       >
         {/* value bubble */}
         <div
-          className="lx-bubble lx-num pointer-events-none absolute -top-7 z-20 rounded-md border border-accent/40 bg-black/80 px-1.5 py-0.5 text-[10px] text-accent-soft shadow-glow"
+          className="lx-bubble lx-num pointer-events-none absolute -top-7 z-20 rounded-md border border-accent/40 bg-black/85 px-1.5 py-0.5 text-[10px] text-accent-soft shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
           style={{ left: `${pct}%` }}
         >
           {disp}

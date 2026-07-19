@@ -189,53 +189,46 @@ export function importXmp(xml: string, fallbackName: string): XmpImportResult {
   }
   void HSL_BANDS
 
-  // ── Colour Grading / Split Toning → approximate global cast ──
-  // Modern Lightroom presets carry much of their "look" in Colour Grading
-  // (PV2012+) or legacy Split Toning, which have no Luxinus equivalent. Rather
-  // than silently dropping the colour character (the #1 reason an imported preset
-  // "does nothing" to colour), we aggregate the graded hue/saturation across the
-  // tonal regions into a single representative cast and approximate it as a
-  // Temperature + Tint nudge. Coarse, but it makes the intended look land.
-  const gradeRegions: { hue: string; sat: string }[] = [
-    { hue: 'ColorGradeGlobalHue', sat: 'ColorGradeGlobalSat' },
-    { hue: 'ColorGradeShadowHue', sat: 'ColorGradeShadowSat' },
-    { hue: 'ColorGradeMidtoneHue', sat: 'ColorGradeMidtoneSat' },
-    { hue: 'ColorGradeHighlightHue', sat: 'ColorGradeHighlightSat' },
-    // Legacy split-toning keys (Hue 0–360, Saturation 0–100).
-    { hue: 'SplitToningShadowHue', sat: 'SplitToningShadowSaturation' },
-    { hue: 'SplitToningHighlightHue', sat: 'SplitToningHighlightSaturation' }
+  // ── Colour Grading / Split Toning → native 3-way color grade ──
+  // Luxinus now has real color-grading wheels, so map the crs regions directly:
+  // Hue 0–360, Saturation 0–100, Luminance −100…100 all line up. Legacy Split
+  // Toning maps onto the shadow/highlight wheels.
+  const cgRegions: { region: 'shadows' | 'midtones' | 'highlights' | 'global'; prefix: string }[] = [
+    { region: 'shadows', prefix: 'ColorGradeShadow' },
+    { region: 'midtones', prefix: 'ColorGradeMidtone' },
+    { region: 'highlights', prefix: 'ColorGradeHighlight' },
+    { region: 'global', prefix: 'ColorGradeGlobal' }
   ]
-  // Consume the lum/blend/balance keys too so they aren't reported as "ignored".
-  for (const k of [
-    'ColorGradeShadowLum', 'ColorGradeMidtoneLum', 'ColorGradeHighlightLum',
-    'ColorGradeGlobalLum', 'ColorGradeBlending', 'SplitToningBalance'
-  ]) {
-    if (get(k) != null) consumed.add(k)
+  const graded: string[] = []
+  for (const { region, prefix } of cgRegions) {
+    const h = use(`${prefix}Hue`)
+    const s = use(`${prefix}Sat`)
+    const l = use(`${prefix}Lum`)
+    if (h !== null) edits.colorGrade[region].hue = clamp(h, 0, 360)
+    if (s !== null) edits.colorGrade[region].sat = clamp(s, 0, 100)
+    if (l !== null) edits.colorGrade[region].lum = clamp(l)
+    if (s || l) graded.push(region)
   }
-  let vx = 0
-  let vy = 0
-  for (const { hue, sat } of gradeRegions) {
-    const h = num(get(hue))
-    const s = num(get(sat))
-    if (h !== null) consumed.add(hue)
-    if (s !== null) consumed.add(sat)
-    if (h === null || s === null || s === 0) continue
-    const rad = (h * Math.PI) / 180
-    vx += s * Math.cos(rad)
-    vy += s * Math.sin(rad)
+  // Legacy split-toning (only fill regions the modern keys didn't set).
+  const stShadowH = use('SplitToningShadowHue')
+  const stShadowS = use('SplitToningShadowSaturation')
+  if (stShadowS !== null && stShadowS > 0 && edits.colorGrade.shadows.sat === 0) {
+    edits.colorGrade.shadows.hue = clamp(stShadowH ?? 0, 0, 360)
+    edits.colorGrade.shadows.sat = clamp(stShadowS, 0, 100)
+    graded.push('shadows')
   }
-  const castSat = Math.hypot(vx, vy)
-  if (castSat > 1) {
-    // Only nudge WB if the preset didn't already set an explicit temperature/tint.
-    const castHue = (Math.atan2(vy, vx) * 180) / Math.PI
-    const s01 = Math.min(1, castSat / 100)
-    const d = (deg: number): number => (Math.cos(((castHue - deg) * Math.PI) / 180)) * s01 * 45
-    const dTemp = d(45) // warm (orange) ↔ cool (blue, 225°)
-    const dTint = d(315) // magenta (315°) ↔ green (135°)
-    if (edits.temperature === 0) edits.temperature = clamp(Math.round(dTemp))
-    if (edits.tint === 0) edits.tint = clamp(Math.round(dTint))
-    mapped.push('Colour grading → WB cast (approx.)')
+  const stHighH = use('SplitToningHighlightHue')
+  const stHighS = use('SplitToningHighlightSaturation')
+  if (stHighS !== null && stHighS > 0 && edits.colorGrade.highlights.sat === 0) {
+    edits.colorGrade.highlights.hue = clamp(stHighH ?? 0, 0, 360)
+    edits.colorGrade.highlights.sat = clamp(stHighS, 0, 100)
+    graded.push('highlights')
   }
+  const blend = use('ColorGradeBlending')
+  if (blend !== null) edits.colorGrade.blending = clamp(blend, 0, 100)
+  const balance = use('SplitToningBalance')
+  if (balance !== null) edits.colorGrade.balance = clamp(balance)
+  if (graded.length) mapped.push(`Colour grading (${[...new Set(graded)].join(', ')})`)
 
   // ── Ignored (present but unsupported) ──
   const ignored: string[] = []

@@ -39,10 +39,10 @@ vec3 ambient(vec2 px) {
   vec3 c = mix(vec3(0.03, 0.03, 0.039), vec3(0.052, 0.048, 0.064), 1.0 - uv.y);
   vec2 a = vec2(0.14 + 0.05 * sin(t), 0.18 + 0.04 * cos(t * 1.1));
   vec2 b = vec2(0.88 + 0.05 * cos(t * 0.8), 0.82 + 0.05 * sin(t * 0.9));
-  vec2 d = vec2(0.58 + 0.10 * sin(t * 0.6), 0.42 + 0.08 * cos(t * 0.5));
-  c += vec3(1.0, 0.16, 0.46) * smoothstep(0.46, 0.0, distance(uv, a)) * 0.15;
-  c += vec3(0.22, 0.34, 0.66) * smoothstep(0.52, 0.0, distance(uv, b)) * 0.15;
-  c += vec3(1.0, 0.45, 0.68) * smoothstep(0.36, 0.0, distance(uv, d)) * 0.06;
+  // Whisper-faint tint so the glass has something to refract — not glowing orbs.
+  // A hair of warm on one corner, cool on the other; near-monochrome overall.
+  c += vec3(1.0, 0.30, 0.52) * smoothstep(0.46, 0.0, distance(uv, a)) * 0.045;
+  c += vec3(0.30, 0.40, 0.62) * smoothstep(0.52, 0.0, distance(uv, b)) * 0.04;
   return c;
 }
 
@@ -85,13 +85,14 @@ void main() {
       // dark slab. A lighter tint + lower opacity so the refracted ambient reads.
       vec3 glass = mix(refr, vec3(0.095, 0.088, 0.106), 0.42) * 1.07;
 
-      // Refined edge-light: a soft, mostly-neutral rim with a faint warm bias.
+      // Refined edge-light: a soft, near-neutral rim (barely-there warm bias).
       float rim = smoothstep(2.4, 0.0, abs(dist));
-      glass += vec3(0.92, 0.7, 0.8) * rim * 0.17;
+      glass += vec3(0.9, 0.82, 0.86) * rim * 0.12;
 
-      // Faint chromatic split, exactly at the edge only.
+      // Barely-there chromatic split, exactly at the edge only — a hint of
+      // dispersion, not a rainbow fringe.
       float split = smoothstep(1.1, 0.0, abs(dist));
-      glass += mix(vec3(0.0, 0.32, 0.62), vec3(0.62, 0.0, 0.24), 0.5 + 0.5 * n.x) * split * 0.09;
+      glass += mix(vec3(0.0, 0.28, 0.5), vec3(0.5, 0.0, 0.2), 0.5 + 0.5 * n.x) * split * 0.035;
 
       col = glass;
     }

@@ -66,6 +66,40 @@ export interface CropRect {
   h: number
 }
 
+// ── Color grading (3-way + global) ──────────────────────────────────────────
+// Lightroom-style color wheels: tint the shadows, midtones, and highlights (and
+// a global cast) with an independent hue + saturation, plus a luminance shift.
+// Balance biases the shadow/highlight split; Blending softens the transitions.
+export interface ColorGradeRegion {
+  hue: number // 0..360 (wheel angle)
+  sat: number // 0..100 (distance from center)
+  lum: number // -100..100 (regional luminance shift)
+}
+export interface ColorGrade {
+  shadows: ColorGradeRegion
+  midtones: ColorGradeRegion
+  highlights: ColorGradeRegion
+  global: ColorGradeRegion
+  blending: number // 0..100 (transition softness; 50 = neutral)
+  balance: number // -100..100 (shadow ↔ highlight bias)
+}
+
+export function zeroColorGradeRegion(): ColorGradeRegion {
+  return { hue: 0, sat: 0, lum: 0 }
+}
+export function zeroColorGrade(): ColorGrade {
+  return {
+    shadows: zeroColorGradeRegion(),
+    midtones: zeroColorGradeRegion(),
+    highlights: zeroColorGradeRegion(),
+    global: zeroColorGradeRegion(),
+    blending: 50,
+    balance: 0
+  }
+}
+export const COLOR_GRADE_REGIONS = ['shadows', 'midtones', 'highlights', 'global'] as const
+export type ColorGradeRegionKey = (typeof COLOR_GRADE_REGIONS)[number]
+
 // ── Local-adjustment masks ──────────────────────────────────────────────────
 // Each mask carries a subset of develop adjustments applied only where the mask
 // covers, blended by coverage. Geometry is normalized 0..1 in view (post-crop)
@@ -167,6 +201,8 @@ export interface EditState {
   // Tone curve + HSL
   curves: ToneCurves
   hsl: HslMixer
+  // Color grading (3-way + global wheels)
+  colorGrade: ColorGrade
   // Geometry
   rotate: number // degrees (free)
   flipH: boolean
@@ -209,6 +245,7 @@ export function defaultEditState(): EditState {
       b: [...IDENTITY_CURVE]
     },
     hsl: zeroHsl(),
+    colorGrade: zeroColorGrade(),
     rotate: 0,
     flipH: false,
     flipV: false,
@@ -244,6 +281,9 @@ export function isEdited(e: EditState): boolean {
   if (e.rotate !== 0 || e.flipH || e.flipV || e.crop) return true
   if (e.masks && e.masks.length > 0) return true
   if (HSL_BANDS.some((b) => e.hsl[b].hue || e.hsl[b].sat || e.hsl[b].lum)) return true
+  if (e.colorGrade && COLOR_GRADE_REGIONS.some((r) => e.colorGrade[r].sat || e.colorGrade[r].lum)) {
+    return true
+  }
   const curveEdited = (c: CurvePoint[]): boolean =>
     c.length !== 2 || c[0].x !== 0 || c[0].y !== 0 || c[1].x !== 1 || c[1].y !== 1
   if (curveEdited(e.curves.rgb) || curveEdited(e.curves.r) || curveEdited(e.curves.g) || curveEdited(e.curves.b)) {
@@ -270,6 +310,7 @@ export function coerceEditState(input: unknown): EditState {
     ...src,
     curves: { ...base.curves, ...(src.curves ?? {}) },
     hsl: { ...base.hsl, ...(src.hsl ?? {}) },
+    colorGrade: { ...base.colorGrade, ...(src.colorGrade ?? {}) },
     crop: src.crop ?? null,
     masks: Array.isArray(src.masks) ? src.masks : []
   }

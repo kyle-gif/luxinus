@@ -4,9 +4,9 @@ import { useStore } from '../../store/useStore'
 const BTN_W = 74
 const PAD = 3
 
-// Animated Simple/Expert switch: a neon glass pill slides between the two
-// positions and stretches toward its target as it travels (a liquid morph),
-// then settles with a springy overshoot.
+// Simple/Expert switch: a restrained segmented control. A neutral raised pill
+// slides between the two positions (a subtle liquid stretch as it travels); the
+// ACTIVE LABEL carries the pink as a signal — no neon fill, no glow.
 export function ModeSwitch(): JSX.Element {
   const mode = useStore((s) => s.mode)
   const setMode = useStore((s) => s.setMode)
@@ -44,7 +44,7 @@ export function ModeSwitch(): JSX.Element {
           onClick={() => setMode(m)}
           aria-pressed={mode === m}
           className={`relative z-10 rounded-full py-1 text-[11px] font-medium capitalize tracking-wide transition-colors duration-300 ${
-            mode === m ? 'text-white' : 'text-muted hover:text-ink'
+            mode === m ? 'text-accent-soft' : 'text-muted hover:text-ink'
           }`}
           style={{ width: BTN_W }}
         >

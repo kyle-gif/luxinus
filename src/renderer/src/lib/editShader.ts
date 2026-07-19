@@ -1,6 +1,32 @@
-import type { EditState, Mask } from '../../../shared/edits'
-import { HSL_BAND_HUE, HSL_BANDS } from '../../../shared/edits'
+import type { ColorGradeRegion, EditState, Mask } from '../../../shared/edits'
+import { COLOR_GRADE_REGIONS, HSL_BAND_HUE, HSL_BANDS } from '../../../shared/edits'
 import { buildCurveLut, curvesAreIdentity } from './curve'
+
+// HSL→RGB (h,s,l in 0..1) — mirror of the shader's, for CPU-side precompute.
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  if (s < 1e-5) return [l, l, l]
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+  const p = 2 * l - q
+  const hue = (t: number): number => {
+    if (t < 0) t += 1
+    if (t > 1) t -= 1
+    if (t < 1 / 6) return p + (q - p) * 6 * t
+    if (t < 1 / 2) return q
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+    return p
+  }
+  return [hue(h + 1 / 3), hue(h), hue(h - 1 / 3)]
+}
+
+// A color-grade region → vec4(zero-mean chroma tint · sat, lum). The tint is the
+// region's hue as a fully-saturated color with its own luminance removed, so it
+// nudges chroma without lifting brightness; scaled by the region's saturation.
+function gradeVec(r: ColorGradeRegion): [number, number, number, number] {
+  const [cr, cg, cb] = hslToRgb((r.hue % 360) / 360, 1, 0.5)
+  const lu = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb
+  const s = r.sat / 100
+  return [(cr - lu) * s, (cg - lu) * s, (cb - lu) * s, r.lum / 100]
+}
 
 // The Luxinus develop pipeline as WebGL shaders — the single source of truth for
 // both the real-time preview (EditCanvas) and full-resolution export, so what
@@ -30,6 +56,12 @@ uniform float uDehaze, uTexture, uGrain;
 uniform float uUseLut;
 uniform vec3 uHsl[8];   // per band: hue, sat, lum  (-1..1)
 uniform float uBandHue[8];
+
+// Color grading — per region: rgb = zero-mean chroma tint (pre-scaled by sat),
+// a = luminance shift (-1..1). uCgParams = (blending 0..1, balance -1..1).
+uniform vec4 uCgSh, uCgMid, uCgHi, uCgGlobal;
+uniform vec2 uCgParams;
+uniform float uCgActive;
 
 uniform int uCompare;   // 0 edited, 1 original, 2 split
 uniform float uSplit;
@@ -202,6 +234,23 @@ vec3 develop(vec2 uv) {
     col = hsl2rgb(hsl);
   }
 
+  // Color grading — tint shadows / midtones / highlights (+ a global cast) by
+  // luminance region. Balance biases the shadow↔highlight split; Blending widens
+  // the overlap so the regions cross-fade rather than band.
+  if (uCgActive > 0.5) {
+    float Lg = clamp(dot(col, LUM), 0.0, 1.0);
+    float bal = uCgParams.y * 0.28;      // shift the split point
+    float blend = mix(0.16, 0.42, uCgParams.x); // transition half-width
+    float wSh = 1.0 - smoothstep(0.0, 0.5 + bal + blend, Lg);
+    float wHi = smoothstep(0.5 + bal - blend, 1.0, Lg);
+    float wMid = clamp(1.0 - wSh - wHi, 0.0, 1.0);
+    vec3 tint = uCgSh.rgb * wSh + uCgMid.rgb * wMid + uCgHi.rgb * wHi + uCgGlobal.rgb;
+    col += tint * 0.55;
+    float dl = uCgSh.a * wSh + uCgMid.a * wMid + uCgHi.a * wHi + uCgGlobal.a;
+    col += dl * 0.18;
+    col = clamp(col, 0.0, 1.0);
+  }
+
   float lum = dot(col, LUM);
   float sat = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);
   float vibAmt = uVibrance * (1.0 - sat);
@@ -342,7 +391,8 @@ void main() {
 export const EDIT_UNIFORMS = [
   'uTex', 'uLut', 'uTexel', 'uExposure', 'uContrast', 'uHighlights', 'uShadows',
   'uWhites', 'uBlacks', 'uTemp', 'uTint', 'uSaturation', 'uVibrance', 'uClarity',
-  'uSharpen', 'uVignette', 'uDehaze', 'uTexture', 'uGrain', 'uUseLut', 'uHsl', 'uBandHue', 'uCompare', 'uSplit',
+  'uSharpen', 'uVignette', 'uDehaze', 'uTexture', 'uGrain', 'uUseLut', 'uHsl', 'uBandHue',
+  'uCgSh', 'uCgMid', 'uCgHi', 'uCgGlobal', 'uCgParams', 'uCgActive', 'uCompare', 'uSplit',
   'uCrop', 'uFlip', 'uRotate', 'uAspect',
   'uMaskCount', 'uMKind', 'uMGeoA', 'uMGeoB', 'uMAdj0', 'uMAdj1', 'uMAdj2',
   'uBrushTex', 'uMBrushSel', 'uMaskPreview',
@@ -532,6 +582,20 @@ export function setEditUniforms(
   })
   gl.uniform3fv(U.uHsl, hsl)
   gl.uniform1fv(U.uBandHue, bandHue)
+
+  // Color grading
+  const cg = e.colorGrade
+  const sh = gradeVec(cg.shadows)
+  const mid = gradeVec(cg.midtones)
+  const hi = gradeVec(cg.highlights)
+  const glob = gradeVec(cg.global)
+  gl.uniform4f(U.uCgSh, sh[0], sh[1], sh[2], sh[3])
+  gl.uniform4f(U.uCgMid, mid[0], mid[1], mid[2], mid[3])
+  gl.uniform4f(U.uCgHi, hi[0], hi[1], hi[2], hi[3])
+  gl.uniform4f(U.uCgGlobal, glob[0], glob[1], glob[2], glob[3])
+  gl.uniform2f(U.uCgParams, cg.blending / 100, cg.balance / 100)
+  const cgActive = COLOR_GRADE_REGIONS.some((r) => cg[r].sat !== 0 || cg[r].lum !== 0)
+  gl.uniform1f(U.uCgActive, cgActive ? 1 : 0)
 
   const crop = e.crop ?? { x: 0, y: 0, w: 1, h: 1 }
   gl.uniform4f(U.uCrop, crop.x, crop.y, crop.w, crop.h)
