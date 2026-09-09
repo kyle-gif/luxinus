@@ -30,7 +30,10 @@ function routeMessage(msg: WorkerResponse): void {
       readyResolve?.()
       return
     case 'thumbnail:result':
-      // Streamed to the renderer as each thumbnail finishes decoding.
+      // Streamed to the renderer as each thumbnail finishes decoding. Settle the
+      // in-flight entry too — otherwise every thumbnail ever requested stays in
+      // `pending` for the life of the process (one leak per photo per folder).
+      settle(msg.requestId, true)
       broadcast(IpcChannels.library.thumbnailReady, {
         filePath: msg.filePath,
         webp: msg.webp,
@@ -118,6 +121,14 @@ async function request<T>(req: Extract<WorkerRequest, { requestId: string }>): P
   })
 }
 
+// Fire-and-forget: the reply reaches the renderer over a broadcast channel, so
+// there is no promise to keep. Used for thumbnails, where tracking one pending
+// entry per photo would cost memory for nothing.
+async function notify(req: Extract<WorkerRequest, { requestId: string }>): Promise<void> {
+  await ensureWorker()
+  worker?.postMessage(req)
+}
+
 async function scanFolder(folderPath: string): Promise<LibraryPhoto[]> {
   const entries = await request<LibraryPhoto[]>({
     kind: 'scan',
@@ -130,10 +141,13 @@ async function scanFolder(folderPath: string): Promise<LibraryPhoto[]> {
   // Kick off thumbnail generation for every photo; results stream to the
   // renderer via the thumbnailReady channel as the queue works through them.
   for (const e of entries) {
-    void request({ kind: 'thumbnail', requestId: randomUUID(), filePath: e.filePath, mtimeMs: e.mtimeMs })
-      .catch(() => {
-        /* per-thumbnail failures are non-fatal; the grid keeps its placeholder */
-      })
+    // Non-fatal by design: a failed thumbnail just leaves its grid placeholder.
+    void notify({
+      kind: 'thumbnail',
+      requestId: randomUUID(),
+      filePath: e.filePath,
+      mtimeMs: e.mtimeMs
+    }).catch(() => {})
   }
   return entries
 }

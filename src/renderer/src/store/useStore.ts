@@ -16,6 +16,9 @@ import {
   type Mask,
   type MaskAdjust,
   type MaskKind,
+  type MaskRefine,
+  type RefineKind,
+  type RefineMode,
   type PhotoMeta,
   type PhotoVM,
   type ProxyState
@@ -114,6 +117,12 @@ interface LuxinusState {
   setWbPicking: (v: boolean) => void
   pickWhiteBalance: (r: number, g: number, b: number) => void
 
+  // Color-range eyedropper: click the photo to (re)sample the selected
+  // color-range mask's reference color.
+  colorPicking: boolean
+  setColorPicking: (v: boolean) => void
+  pickMaskColor: (r: number, g: number, b: number) => void
+
   // Masking is a dedicated workspace (like Lightroom), toggled on/off.
   maskMode: boolean
   setMaskMode: (v: boolean) => void
@@ -121,12 +130,24 @@ interface LuxinusState {
   selectedMaskId: string | null
   selectMask: (id: string | null) => void
   addMask: (kind: MaskKind) => void
+  // One-click DR masks: pre-aimed luminance ranges at the clipped ends.
+  // Thresholds stay adjustable afterwards — they're just the range handles.
+  addQuickMask: (preset: 'blown' | 'crushed') => void
   updateMask: (id: string, patch: Partial<Mask>) => void
   updateMaskAdjust: (id: string, patch: Partial<MaskAdjust>) => void
   removeMask: (id: string) => void
-  // Mask coverage overlay (red preview of the selected mask's reach)
+  // Refinements: combine further selections onto a mask's primary shape.
+  selectedRefineId: string | null
+  selectRefine: (id: string | null) => void
+  addRefine: (maskId: string, kind: RefineKind, mode: RefineMode) => void
+  updateRefine: (maskId: string, refineId: string, patch: Partial<MaskRefine>) => void
+  removeRefine: (maskId: string, refineId: string) => void
+  // Mask coverage overlay (preview of the selected mask's reach)
   showMaskOverlay: boolean
   setShowMaskOverlay: (v: boolean) => void
+  // Overlay rendering: 0 red-on-image · 1 white-on-black · 2 black-on-white
+  maskOverlayMode: 0 | 1 | 2
+  cycleMaskOverlayMode: () => void
   suppressMaskOverlay: boolean // transient: hide overlay while dragging an adjustment
   setSuppressMaskOverlay: (v: boolean) => void
   // Brush painting
@@ -212,6 +233,10 @@ interface LuxinusState {
   // Live RGB+luma histogram of the developed preview (computed by EditCanvas)
   histogram: { r: number[]; g: number[]; b: number[]; lum: number[] } | null
   setHistogram: (h: { r: number[]; g: number[]; b: number[]; lum: number[] }) => void
+
+  // Clipping zebras on the stage (J): red = blown highlights, blue = crushed.
+  showClipping: boolean
+  setShowClipping: (v: boolean) => void
 
   // Before/after compare
   showBefore: boolean
@@ -332,25 +357,54 @@ export const useStore = create<LuxinusState>((set, get) => {
       set({ wbPicking: false })
     },
 
+    colorPicking: false,
+    setColorPicking: (v) => set({ colorPicking: v }),
+    pickMaskColor: (r, g, b) => {
+      const rgb: [number, number, number] = [Math.round(r), Math.round(g), Math.round(b)]
+      const mask = get().edit.masks.find((m) => m.id === get().selectedMaskId)
+      // A selected color refinement takes the sample; otherwise the primary.
+      const refine = mask?.refine?.find((x) => x.id === get().selectedRefineId)
+      if (mask && refine?.kind === 'colorRange' && refine.color) {
+        get().updateRefine(mask.id, refine.id, { color: { ...refine.color, rgb } })
+      } else if (mask?.kind === 'colorRange' && mask.color) {
+        get().updateMask(mask.id, { color: { ...mask.color, rgb } })
+      }
+      set({ colorPicking: false })
+    },
+
     maskMode: false,
     setMaskMode: (v) =>
       set((s) => ({
         maskMode: v,
         cropMode: v ? false : s.cropMode, // the two tools are mutually exclusive
-        selectedMaskId: v ? s.selectedMaskId : null // clear overlay when leaving
+        selectedMaskId: v ? s.selectedMaskId : null, // clear overlay when leaving
+        selectedRefineId: v ? s.selectedRefineId : null,
+        colorPicking: v ? s.colorPicking : false
       })),
     selectedMaskId: null,
-    selectMask: (id) => set({ selectedMaskId: id }),
+    selectMask: (id) => set({ selectedMaskId: id, selectedRefineId: null }),
     addMask: (kind) => {
       const geom =
         kind === 'radial'
           ? { radial: { cx: 0.5, cy: 0.5, rx: 0.28, ry: 0.34, feather: 0.5, invert: false } }
           : kind === 'linear'
             ? { linear: { x1: 0.5, y1: 0.18, x2: 0.5, y2: 0.6 } }
-            : { brush: { strokes: [] } }
+            : kind === 'lumRange'
+              ? // Default to the upper range — the common "recover highlights" case.
+                { lum: { lo: 0.6, hi: 1, featherLo: 0.15, featherHi: 0.05 } }
+              : kind === 'colorRange'
+                ? { color: { rgb: [128, 128, 128] as [number, number, number], tolerance: 0.3, feather: 0.35 } }
+                : { brush: { strokes: [] } }
       const e = get().edit
       const count = e.masks.filter((m) => m.kind === kind).length + 1
-      const label = kind === 'radial' ? 'Radial' : kind === 'linear' ? 'Linear' : 'Brush'
+      const LABELS: Record<MaskKind, string> = {
+        radial: 'Radial',
+        linear: 'Linear',
+        brush: 'Brush',
+        lumRange: 'Luminance',
+        colorRange: 'Color'
+      }
+      const label = LABELS[kind]
       const mask: Mask = {
         id: crypto.randomUUID(),
         kind,
@@ -358,6 +412,29 @@ export const useStore = create<LuxinusState>((set, get) => {
         enabled: true,
         adjust: zeroMaskAdjust(),
         ...geom
+      }
+      commitEdit({ ...e, masks: [...e.masks, mask] })
+      // A fresh color-range mask goes straight to the eyedropper — the sample
+      // IS the mask, so picking it is the natural first step.
+      set({ selectedMaskId: mask.id, colorPicking: kind === 'colorRange' })
+    },
+    addQuickMask: (preset) => {
+      // Proxy-domain approximation until the linear RAW path lands (M2): the
+      // range handles select near-clipped tones; feather reaches into the
+      // almost-gone zone so recovery blends instead of posterizing.
+      const lum =
+        preset === 'blown'
+          ? { lo: 0.98, hi: 1, featherLo: 0.1, featherHi: 0 }
+          : { lo: 0, hi: 0.02, featherLo: 0, featherHi: 0.1 }
+      const e = get().edit
+      const name = preset === 'blown' ? 'Blown highlights' : 'Crushed shadows'
+      const mask: Mask = {
+        id: crypto.randomUUID(),
+        kind: 'lumRange',
+        name,
+        enabled: true,
+        adjust: zeroMaskAdjust(),
+        lum
       }
       commitEdit({ ...e, masks: [...e.masks, mask] })
       set({ selectedMaskId: mask.id })
@@ -376,11 +453,53 @@ export const useStore = create<LuxinusState>((set, get) => {
     removeMask: (id) => {
       const e = get().edit
       commitEdit({ ...e, masks: e.masks.filter((m) => m.id !== id) })
-      if (get().selectedMaskId === id) set({ selectedMaskId: null })
+      if (get().selectedMaskId === id) set({ selectedMaskId: null, selectedRefineId: null })
+    },
+
+    selectedRefineId: null,
+    selectRefine: (id) => set({ selectedRefineId: id }),
+    addRefine: (maskId, kind, mode) => {
+      const geom =
+        kind === 'lumRange'
+          ? { lum: { lo: 0.6, hi: 1, featherLo: 0.15, featherHi: 0.05 } }
+          : { color: { rgb: [128, 128, 128] as [number, number, number], tolerance: 0.3, feather: 0.35 } }
+      const refine: MaskRefine = { id: crypto.randomUUID(), kind, mode, invert: false, ...geom }
+      const e = get().edit
+      commitEdit({
+        ...e,
+        masks: e.masks.map((m) => (m.id === maskId ? { ...m, refine: [...(m.refine ?? []), refine] } : m))
+      })
+      // A fresh color refinement goes straight to the eyedropper, like a
+      // fresh color-range mask does.
+      set({ selectedRefineId: refine.id, colorPicking: kind === 'colorRange' })
+    },
+    updateRefine: (maskId, refineId, patch) => {
+      const e = get().edit
+      commitEdit({
+        ...e,
+        masks: e.masks.map((m) =>
+          m.id === maskId
+            ? { ...m, refine: (m.refine ?? []).map((r) => (r.id === refineId ? { ...r, ...patch } : r)) }
+            : m
+        )
+      })
+    },
+    removeRefine: (maskId, refineId) => {
+      const e = get().edit
+      commitEdit({
+        ...e,
+        masks: e.masks.map((m) =>
+          m.id === maskId ? { ...m, refine: (m.refine ?? []).filter((r) => r.id !== refineId) } : m
+        )
+      })
+      if (get().selectedRefineId === refineId) set({ selectedRefineId: null })
     },
 
     showMaskOverlay: true,
     setShowMaskOverlay: (v) => set({ showMaskOverlay: v }),
+    maskOverlayMode: 0,
+    cycleMaskOverlayMode: () =>
+      set((s) => ({ maskOverlayMode: ((s.maskOverlayMode + 1) % 3) as 0 | 1 | 2 })),
     suppressMaskOverlay: false,
     setSuppressMaskOverlay: (v) => set({ suppressMaskOverlay: v }),
     brushRadius: 0.05,
@@ -401,13 +520,27 @@ export const useStore = create<LuxinusState>((set, get) => {
     },
     extendBrushStroke: (id, pt) => {
       const e = get().edit
+      const mask = e.masks.find((m) => m.id === id)
+      const last = mask?.brush?.strokes[mask.brush.strokes.length - 1]
+      if (!last) return
+      // Drop points the stroke doesn't need. A pointermove fires far denser than
+      // the brush is wide, and every extra point costs a full copy of the point
+      // list (each stroke is immutable, for undo) plus a coverage re-bake. At a
+      // fifth of the radius the rendered polyline is indistinguishable.
+      const prev = last.points[last.points.length - 1]
+      if (prev) {
+        const minStep = Math.max(0.0015, last.radius * 0.2)
+        const dx = pt.x - prev.x
+        const dy = pt.y - prev.y
+        if (dx * dx + dy * dy < minStep * minStep) return
+      }
       commitEdit({
         ...e,
         masks: e.masks.map((m) => {
           if (m.id !== id || !m.brush || m.brush.strokes.length === 0) return m
           const strokes = m.brush.strokes.slice()
-          const last = strokes[strokes.length - 1]
-          strokes[strokes.length - 1] = { ...last, points: [...last.points, pt] }
+          const tail = strokes[strokes.length - 1]
+          strokes[strokes.length - 1] = { ...tail, points: [...tail.points, pt] }
           return { ...m, brush: { strokes } }
         })
       })
@@ -435,8 +568,9 @@ export const useStore = create<LuxinusState>((set, get) => {
         const res = await window.luxinus.library.openFolder()
         if (res.canceled) return
         for (const p of get().photos) if (p.thumbUrl) URL.revokeObjectURL(p.thumbUrl)
-        const proxy = get().proxy
+        const { proxy, denoiseProxy } = get()
         if (proxy.url) URL.revokeObjectURL(proxy.url)
+        if (denoiseProxy.url) URL.revokeObjectURL(denoiseProxy.url)
 
         const photos: PhotoVM[] = res.photos.map((p) => ({ ...p, thumbUrl: null }))
         set({
@@ -446,6 +580,7 @@ export const useStore = create<LuxinusState>((set, get) => {
           selection: new Set(),
           filter: { ...DEFAULT_FILTER },
           proxy: { ...IDLE_PROXY },
+          denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null },
           edit: defaultEditState(),
           editedPaths: new Set()
         })
@@ -474,6 +609,8 @@ export const useStore = create<LuxinusState>((set, get) => {
       if (cur.selectedPath === filePath && cur.proxy.status !== 'idle') return
       const photo = cur.photos.find((p) => p.filePath === filePath)
       if (cur.proxy.url) URL.revokeObjectURL(cur.proxy.url)
+      // The previous photo's denoise result is about to be dropped from state.
+      if (cur.denoiseProxy.url) URL.revokeObjectURL(cur.denoiseProxy.url)
       set({
         selectedPath: filePath,
         selection: new Set([filePath]),
@@ -482,6 +619,7 @@ export const useStore = create<LuxinusState>((set, get) => {
         cropMode: false,
         maskMode: false,
         selectedMaskId: null,
+        colorPicking: false,
         snapshots: snapshotStore.get(filePath) ?? [],
         denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null }
       })
@@ -733,7 +871,20 @@ export const useStore = create<LuxinusState>((set, get) => {
           return
         }
         ctx.putImageData(new ImageData(new Uint8ClampedArray(res.rgba), res.width, res.height), 0, 0)
-        const url = c.toDataURL('image/png')
+        // A blob URL, not toDataURL: a 1600px PNG data URL is a multi-megabyte
+        // base64 string that has to be re-parsed on every texture upload.
+        const url = await new Promise<string>((resolve, reject) => {
+          c.toBlob(
+            (blob) => (blob ? resolve(URL.createObjectURL(blob)) : reject(new Error('encode failed'))),
+            'image/png'
+          )
+        })
+        if (get().selectedPath !== path) {
+          URL.revokeObjectURL(url)
+          return
+        }
+        const prevUrl = get().denoiseProxy.url
+        if (prevUrl) URL.revokeObjectURL(prevUrl)
         set({ denoiseProxy: { filePath: path, url, status: 'ready', progress: 1, message: null } })
         // Give the slider a sensible starting strength if it's still at zero.
         if (get().edit.denoise === 0) get().setEdit({ denoise: 60 })
@@ -743,11 +894,17 @@ export const useStore = create<LuxinusState>((set, get) => {
         off()
       }
     },
-    clearDenoise: () =>
-      set({ denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null } }),
+    clearDenoise: () => {
+      const url = get().denoiseProxy.url
+      if (url) URL.revokeObjectURL(url)
+      set({ denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null } })
+    },
 
     histogram: null,
     setHistogram: (h) => set({ histogram: h }),
+
+    showClipping: false,
+    setShowClipping: (v) => set({ showClipping: v }),
 
     showBefore: false,
     setShowBefore: (v) => set({ showBefore: v }),

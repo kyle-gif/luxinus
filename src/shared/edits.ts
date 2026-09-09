@@ -2,7 +2,9 @@
 // main (sidecar persistence). Originals are never modified; this state is the
 // entire description of an edit and is written to a sidecar JSON next to the file.
 
-export const EDIT_SCHEMA_VERSION = 1
+// v2: masks gained combinable `refine` components (add/subtract/intersect).
+// v1 sidecars load unchanged — coerceEditState fills `refine: []`.
+export const EDIT_SCHEMA_VERSION = 2
 
 // A single tone-curve control point in 0..1 space (input → output).
 export interface CurvePoint {
@@ -106,7 +108,7 @@ export type ColorGradeRegionKey = (typeof COLOR_GRADE_REGIONS)[number]
 // space — the same space the mask overlays draw in — applied by the shader as a
 // compositing pass over the globally-developed image.
 
-export type MaskKind = 'radial' | 'linear' | 'brush'
+export type MaskKind = 'radial' | 'linear' | 'brush' | 'lumRange' | 'colorRange'
 
 // The local adjustments a mask can carry (a focused subset of EditState).
 export interface MaskAdjust {
@@ -120,17 +122,19 @@ export interface MaskAdjust {
   tint: number
   saturation: number
   clarity: number
+  dehaze: number // -100..100 (v2)
+  sharpness: number // 0..100 (v2)
 }
 
 export const MASK_ADJUST_KEYS = [
   'exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks',
-  'temperature', 'tint', 'saturation', 'clarity'
+  'temperature', 'tint', 'saturation', 'clarity', 'dehaze', 'sharpness'
 ] as const
 
 export function zeroMaskAdjust(): MaskAdjust {
   return {
     exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
-    temperature: 0, tint: 0, saturation: 0, clarity: 0
+    temperature: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, sharpness: 0
   }
 }
 
@@ -152,6 +156,28 @@ export interface LinearGeom {
   y2: number
 }
 
+// Luminance range mask — selects pixels whose SOURCE luminance falls inside
+// [lo, hi], with a smooth falloff (feather) beyond each end. Evaluated on the
+// pre-develop source so coverage stays stable while adjustments are dragged
+// (no feedback loop between a mask's own edits and its selection). This is the
+// primary dynamic-range recovery tool.
+export interface LumRangeGeom {
+  lo: number // 0..1 lower luminance bound
+  hi: number // 0..1 upper bound
+  featherLo: number // 0..1 falloff width below lo
+  featherHi: number // 0..1 falloff width above hi
+}
+
+// Color range mask — selects pixels perceptually similar (Oklab distance) to a
+// sampled color. The sample is stored as sRGB (0..255) so the UI can show a
+// swatch; the shader converts to Oklab at upload. tolerance/feather are 0..1
+// UI-normalized and mapped to perceptual distances at upload.
+export interface ColorRangeGeom {
+  rgb: [number, number, number] // sampled color, 0..255
+  tolerance: number // 0..1 — how far a color may drift and still be selected
+  feather: number // 0..1 — softness of the selection edge
+}
+
 export interface BrushPoint {
   x: number
   y: number
@@ -165,15 +191,37 @@ export interface BrushGeom {
   strokes: BrushStroke[]
 }
 
+// ── Mask refinements ────────────────────────────────────────────────────────
+// A mask's PRIMARY shape (its kind + geometry) can be refined by combining it
+// with further selections: Add (union), Subtract, Intersect — Lightroom's
+// "create a mask, then refine it" model. Refinements are the source-evaluated
+// kinds (luminance / color range), which need no on-canvas gizmos.
+export type RefineMode = 'add' | 'subtract' | 'intersect'
+export type RefineKind = 'lumRange' | 'colorRange'
+export interface MaskRefine {
+  id: string
+  kind: RefineKind
+  mode: RefineMode
+  invert: boolean
+  lum?: LumRangeGeom
+  color?: ColorRangeGeom
+}
+
 export interface Mask {
   id: string
   kind: MaskKind
   name: string
   enabled: boolean
+  /** Max opacity of the mask's effect, 0..1. Absent = 1 (full). */
+  density?: number
   adjust: MaskAdjust
   radial?: RadialGeom
   linear?: LinearGeom
   brush?: BrushGeom
+  lum?: LumRangeGeom
+  color?: ColorRangeGeom
+  /** Combinable refinements applied to the primary shape (v2+). */
+  refine?: MaskRefine[]
 }
 
 export interface EditState {
@@ -312,6 +360,14 @@ export function coerceEditState(input: unknown): EditState {
     hsl: { ...base.hsl, ...(src.hsl ?? {}) },
     colorGrade: { ...base.colorGrade, ...(src.colorGrade ?? {}) },
     crop: src.crop ?? null,
-    masks: Array.isArray(src.masks) ? src.masks : []
+    // v1→v2 mask migration: fill the refine list and the adjust keys new in v2.
+    // Everything else in a v1 mask is structurally valid v2.
+    masks: Array.isArray(src.masks)
+      ? src.masks.map((m) => ({
+          ...m,
+          adjust: { ...zeroMaskAdjust(), ...(m.adjust ?? {}) },
+          refine: Array.isArray(m.refine) ? m.refine : []
+        }))
+      : []
   }
 }

@@ -1,6 +1,7 @@
 import type { ColorGradeRegion, EditState, Mask } from '../../../shared/edits'
 import { COLOR_GRADE_REGIONS, HSL_BAND_HUE, HSL_BANDS } from '../../../shared/edits'
 import { buildCurveLut, curvesAreIdentity } from './curve'
+import { srgbToOklab } from './color'
 
 // HSL→RGB (h,s,l in 0..1) — mirror of the shader's, for CPU-side precompute.
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
@@ -75,7 +76,7 @@ uniform float uAspect;  // image w/h (for correct rotation about center)
 // Local-adjustment masks (radial + linear; parametric, applied after develop).
 // Brush masks are handled separately (they need a coverage texture).
 uniform int uMaskCount;
-uniform float uMKind[8];   // 0 radial, 1 linear, 2 brush
+uniform float uMKind[8];   // 0 radial, 1 linear, 2 brush, 3 lum range, 4 color range
 uniform vec4 uMGeoA[8];    // radial: cx,cy,rx,ry · linear: x1,y1,x2,y2
 uniform vec4 uMGeoB[8];    // radial: feather, invert, -, -
 uniform vec4 uMAdj0[8];    // exposure, contrast, highlights, shadows
@@ -85,7 +86,20 @@ uniform vec4 uMAdj2[8];    // saturation, clarity, -, -
 // uMBrushSel selects a mask's channel (e.g. (1,0,0,0)) so dot() reads it.
 uniform sampler2D uBrushTex;
 uniform vec4 uMBrushSel[8];
-uniform int uMaskPreview; // slot to show as a red coverage overlay, or -1
+// Refinements: a shared pool of source-evaluated components (lum/color range)
+// combined onto a mask's primary shape. Per mask, uMRefine = (poolStart, count).
+// uRMeta = (kind 3|4, mode 0 add/1 subtract/2 intersect, invert, -).
+uniform vec4 uRMeta[8];
+uniform vec4 uRGeoA[8];
+uniform vec4 uRGeoB[8];
+uniform vec2 uMRefine[8];
+uniform int uMaskPreview; // slot to show as a coverage overlay, or -1
+uniform int uOverlayMode; // 0 red · 1 white-on-black · 2 black-on-white
+uniform int uShowClip;    // 1 = zebra-stripe clipped pixels (red blown · blue crushed)
+// 1 when the unsharp (local-contrast) term is actually consumed — by global
+// clarity/sharpening, or by a mask's clarity/sharpness. Computing it costs FOUR
+// extra develop() evaluations per pixel, so it stays off unless something reads it.
+uniform float uNeedHi;
 
 // AI denoise: a restored copy of the source, blended in by uDenoiseAmt (0..1).
 uniform sampler2D uDenoiseTex;
@@ -93,6 +107,69 @@ uniform float uDenoiseAmt;
 uniform float uHasDenoise;
 
 const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
+
+// ── Shared adjustment primitives ────────────────────────────────────────────
+// Used by BOTH the global develop() pass and per-mask local adjustments so the
+// math never forks. For local use, pass strength pre-scaled by mask coverage.
+vec3 adjWhiteBalance(vec3 c, float temp, float tint) {
+  // +temp = warmer (more red, less blue). +tint = magenta, like Lightroom.
+  c.r *= 1.0 + temp * 0.35;
+  c.b *= 1.0 - temp * 0.35;
+  c.g *= 1.0 - tint * 0.22;
+  c.r *= 1.0 + tint * 0.11;
+  c.b *= 1.0 + tint * 0.11;
+  return c;
+}
+// Photographic exposure: LINEAR-light multiply with a monotonic soft clip at
+// the top (knee 0.9) so overexposure rolls off instead of clipping hard.
+vec3 adjExposure(vec3 c, float ev) {
+  if (abs(ev) < 0.0001) return c;
+  vec3 lin = pow(max(c, 0.0), vec3(2.2)) * pow(2.0, ev);
+  vec3 e = max(lin - 0.9, 0.0);
+  lin = min(lin, vec3(0.9)) + 0.1 * (e / (e + 0.1));
+  return pow(lin, vec3(1.0 / 2.2));
+}
+// S-curve pivoting on mid-grey, Lightroom-like.
+vec3 adjContrast(vec3 c, float amt) {
+  return (c - 0.5) * (1.0 + amt) + 0.5;
+}
+// Tonal regions — broad, overlapping masks so Highlights/Shadows act through
+// the whole upper/lower range; every slider brightens its region when positive.
+vec3 adjTonal(vec3 c, float hi, float sh, float wh, float bl) {
+  float l = clamp(dot(c, LUM), 0.0, 1.0);
+  c += hi * 0.5 * smoothstep(0.25, 0.9, l);
+  c += sh * 0.5 * (1.0 - smoothstep(0.1, 0.75, l));
+  c += wh * 0.4 * smoothstep(0.55, 1.0, l);
+  c += bl * 0.4 * (1.0 - smoothstep(0.0, 0.45, l));
+  return c;
+}
+// Dehaze: + removes atmospheric veiling (pull the airlight, add contrast +
+// saturation); − adds haze. A perceptual approximation, not physical.
+vec3 adjDehaze(vec3 c, float amt) {
+  if (abs(amt) < 0.001) return c;
+  float airlight = min(min(c.r, c.g), c.b);
+  c -= amt * 0.35 * airlight;
+  c = (c - 0.5) * (1.0 + amt * 0.45) + 0.5;
+  float dl = dot(c, LUM);
+  return mix(vec3(dl), c, 1.0 + amt * 0.4);
+}
+
+// sRGB → Oklab, for perceptual color-distance masks. Mirror of lib/color.ts —
+// keep the two in sync.
+vec3 srgb2oklab(vec3 c) {
+  c = pow(max(c, 0.0), vec3(2.2));
+  float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+  float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+  float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+  l = pow(l, 1.0 / 3.0);
+  m = pow(m, 1.0 / 3.0);
+  s = pow(s, 1.0 / 3.0);
+  return vec3(
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+  );
+}
 
 vec3 rgb2hsl(vec3 c) {
   float mx = max(max(c.r, c.g), c.b);
@@ -156,56 +233,13 @@ vec3 sampleSource(vec2 uv) {
 vec3 develop(vec2 uv) {
   vec3 col = sampleSource(uv);
 
-  // White balance. +temp = warmer (more red, less blue). +tint = magenta
-  // (less green, more red/blue), matching Lightroom's direction.
-  col.r *= 1.0 + uTemp * 0.35;
-  col.b *= 1.0 - uTemp * 0.35;
-  col.g *= 1.0 - uTint * 0.22;
-  col.r *= 1.0 + uTint * 0.11;
-  col.b *= 1.0 + uTint * 0.11;
-
-  // Exposure (stops) — a photographic exposure is a LINEAR-light multiply, so
-  // convert out of sRGB gamma, scale, and back. Doing this in gamma space (as
-  // before) shifted midtones oddly and clipped highlights unnaturally.
-  if (abs(uExposure) > 0.0001) {
-    vec3 lin = pow(max(col, 0.0), vec3(2.2)) * pow(2.0, uExposure);
-    // Soft clip in LINEAR light: near-identity below the knee, asymptotes to 1 so
-    // overexposed values roll off smoothly. Monotonic — pushing exposure never
-    // darkens a pixel — and leaves un-clipped tones essentially untouched.
-    vec3 e = max(lin - 0.9, 0.0);
-    lin = min(lin, vec3(0.9)) + 0.1 * (e / (e + 0.1));
-    col = pow(lin, vec3(1.0 / 2.2));
-  }
-
-  // Contrast — S-curve pivoting on mid-grey (0.5), Lightroom-like.
-  col = (col - 0.5) * (1.0 + uContrast) + 0.5;
-
-  // Tonal regions. Every slider brightens its region when POSITIVE (Lightroom
-  // convention): +highlights brightens highlights, +shadows lifts shadows,
-  // +whites pushes the white point up, +blacks lifts blacks (−blacks crushes).
-  float l = clamp(dot(col, LUM), 0.0, 1.0);
-  // Broad, overlapping tonal masks so Highlights/Shadows act through the whole
-  // upper/lower range (not just the extremes) — this is what makes them read as
-  // "working" on ordinary midtone subjects, matching Lightroom's feel. Whites and
-  // Blacks stay tighter to the endpoints.
-  float wHi = smoothstep(0.25, 0.9, l);        // highlights: upper half and up
-  float wSh = 1.0 - smoothstep(0.1, 0.75, l);  // shadows: lower half and down
-  float wWh = smoothstep(0.55, 1.0, l);        // whites (brights)
-  float wBl = 1.0 - smoothstep(0.0, 0.45, l);  // blacks (darks)
-  col += uHighlights * 0.5 * wHi;
-  col += uShadows * 0.5 * wSh;
-  col += uWhites * 0.4 * wWh;
-  col += uBlacks * 0.4 * wBl;
-
-  // Dehaze: +removes atmospheric veiling (pull the airlight ~ per-pixel min, add
-  // contrast + saturation); −adds haze. A perceptual approximation, not physical.
-  if (abs(uDehaze) > 0.001) {
-    float airlight = min(min(col.r, col.g), col.b);
-    col -= uDehaze * 0.35 * airlight;
-    col = (col - 0.5) * (1.0 + uDehaze * 0.45) + 0.5;
-    float dl = dot(col, LUM);
-    col = mix(vec3(dl), col, 1.0 + uDehaze * 0.4);
-  }
+  // The shared adjustment primitives (see top of shader) — the same functions
+  // run per-mask, so global and local adjustments can never drift apart.
+  col = adjWhiteBalance(col, uTemp, uTint);
+  col = adjExposure(col, uExposure);
+  col = adjContrast(col, uContrast);
+  col = adjTonal(col, uHighlights, uShadows, uWhites, uBlacks);
+  col = adjDehaze(col, uDehaze);
 
   col = clamp(col, 0.0, 1.0);
 
@@ -260,27 +294,60 @@ vec3 develop(vec2 uv) {
   return col;
 }
 
-// Coverage of mask i at uv (0..1), in the displayed (post-crop) view space.
+// Selection of a source-evaluated range: luminance (geoA = lo,hi,fLo,fHi) when
+// kind < 3.5, else color (geoA = okLab,tolerance · geoB.x = feather). Shared by
+// the primary lum/color branches and the refinement fold.
+float rangeShape(float kindV, vec4 ga, vec4 gb, vec2 uv) {
+  if (kindV < 3.5) {
+    float l = dot(sampleSource(uv), LUM);
+    float rise = smoothstep(ga.x - max(ga.z, 1e-4), ga.x, l);
+    float fall = 1.0 - smoothstep(ga.y, ga.y + max(ga.w, 1e-4), l);
+    return rise * fall;
+  }
+  float d = distance(srgb2oklab(sampleSource(uv)), ga.xyz);
+  return 1.0 - smoothstep(ga.w, ga.w + max(gb.x, 1e-3), d);
+}
+
+// Coverage of mask i at uv (0..1), in the displayed (post-crop) view space:
+// primary shape → refinements (add = union, subtract, intersect) → density.
 float maskWeight(int i, vec2 uv) {
   for (int k = 0; k < 8; k++) {
     if (k != i) continue;
     vec4 g = uMGeoA[k];
+    float w = 0.0;
     if (uMKind[k] < 0.5) {
       // Radial ellipse: 1 inside, feathered to 0 at the rim.
       vec2 d = (uv - g.xy) / max(g.zw, vec2(1e-4));
       float r = length(d);
       float feather = max(uMGeoB[k].x, 0.001);
       float m = 1.0 - smoothstep(1.0 - feather, 1.0, r);
-      return uMGeoB[k].y > 0.5 ? 1.0 - m : m;
+      w = uMGeoB[k].y > 0.5 ? 1.0 - m : m;
     } else if (uMKind[k] < 1.5) {
-      // Linear gradient: 0 at p1 ramping to 1 at p2.
+      // Linear gradient: 0 at p1 ramping to 1 at p2 (the span IS the falloff).
       vec2 dir = g.zw - g.xy;
       float t = dot(uv - g.xy, dir) / max(dot(dir, dir), 1e-6);
-      return clamp(t, 0.0, 1.0);
-    } else {
+      w = clamp(t, 0.0, 1.0);
+    } else if (uMKind[k] < 2.5) {
       // Brush: coverage from the packed brush texture channel.
-      return clamp(dot(texture2D(uBrushTex, uv), uMBrushSel[k]), 0.0, 1.0);
+      w = clamp(dot(texture2D(uBrushTex, uv), uMBrushSel[k]), 0.0, 1.0);
+    } else {
+      // Luminance / color range, evaluated on the pre-develop source so
+      // coverage doesn't shift while the mask's own adjustments are dragged.
+      w = rangeShape(uMKind[k], g, uMGeoB[k], uv);
     }
+
+    // Fold in this mask's refinement components from the shared pool.
+    vec2 rr = uMRefine[k];
+    for (int c = 0; c < 8; c++) {
+      float fc = float(c);
+      if (fc < rr.x || fc >= rr.x + rr.y) continue;
+      float s = rangeShape(uRMeta[c].x, uRGeoA[c], uRGeoB[c], uv);
+      if (uRMeta[c].z > 0.5) s = 1.0 - s;
+      if (uRMeta[c].y < 0.5) w = w + s - w * s;     // add (union)
+      else if (uRMeta[c].y < 1.5) w = w * (1.0 - s); // subtract
+      else w = w * s;                                // intersect
+    }
+    return w * uMGeoB[k].z; // density
   }
   return 0.0;
 }
@@ -294,27 +361,18 @@ vec3 applyLocalMask(int i, vec3 c, float hi, vec2 uv) {
   for (int k = 0; k < 8; k++) {
     if (k == i) { a0 = uMAdj0[k]; a1 = uMAdj1[k]; a2 = uMAdj2[k]; }
   }
-  vec3 o = c;
-  // White balance
-  o.r *= 1.0 + a1.z * 0.35 * w;
-  o.b *= 1.0 - a1.z * 0.35 * w;
-  o.g *= 1.0 - a1.w * 0.22 * w;
-  o.r *= 1.0 + a1.w * 0.11 * w;
-  o.b *= 1.0 + a1.w * 0.11 * w;
-  // Exposure (a0.x pre-scaled to stops) + contrast
-  o *= pow(2.0, a0.x * w);
-  o = (o - 0.5) * (1.0 + a0.y * w) + 0.5;
-  // Tonal regions
-  float l = clamp(dot(o, LUM), 0.0, 1.0);
-  o += a0.z * 0.5 * smoothstep(0.25, 0.9, l) * w;
-  o += a0.w * 0.5 * (1.0 - smoothstep(0.1, 0.75, l)) * w;
-  o += a1.x * 0.4 * smoothstep(0.55, 1.0, l) * w;
-  o += a1.y * 0.4 * (1.0 - smoothstep(0.0, 0.45, l)) * w;
+  // The SAME primitives as the global pass, with strengths scaled by coverage.
+  vec3 o = adjWhiteBalance(c, a1.z * w, a1.w * w);
+  o = adjExposure(o, a0.x * w);
+  o = adjContrast(o, a0.y * w);
+  o = adjTonal(o, a0.z * w, a0.w * w, a1.x * w, a1.y * w);
+  o = adjDehaze(o, a2.z * w);
   o = clamp(o, 0.0, 1.0);
-  // Saturation + clarity
+  // Saturation + local contrast (clarity broad, sharpness fine — both reuse
+  // the unsharp term computed once in main).
   float lum = dot(o, LUM);
   o = mix(vec3(lum), o, 1.0 + a2.x * w);
-  o += hi * a2.y * 0.8 * w;
+  o += hi * (a2.y * 0.8 + a2.w * 1.2) * w;
   return clamp(o, 0.0, 1.0);
 }
 
@@ -329,7 +387,7 @@ void main() {
 
   // Local contrast (unsharp) — drives global clarity/sharpen AND per-mask clarity.
   float hi = 0.0;
-  if (abs(uClarity) > 0.001 || uSharpen > 0.001 || uMaskCount > 0) {
+  if (uNeedHi > 0.5) {
     float c0 = dot(col, LUM);
     float rad = 3.0;
     float blur =
@@ -348,10 +406,19 @@ void main() {
     col = applyLocalMask(i, col, hi, vUv);
   }
 
-  // Coverage overlay: paint the selected mask's reach in red over a dimmed image
-  // so it's obvious what a mask affects (Lightroom-style). Preview only.
+  // Coverage overlay for the selected mask (Lightroom-style). Preview only.
+  // uOverlayMode: 0 = red over the dimmed image · 1 = white-on-black matte ·
+  // 2 = black-on-white matte (cycled with Shift+O).
   if (uMaskPreview >= 0) {
     float w = maskWeight(uMaskPreview, vUv);
+    if (uOverlayMode == 1) {
+      gl_FragColor = vec4(vec3(w), 1.0);
+      return;
+    }
+    if (uOverlayMode == 2) {
+      gl_FragColor = vec4(vec3(1.0 - w), 1.0);
+      return;
+    }
     vec3 dim = mix(col, vec3(dot(col, LUM)), 0.35) * 0.7;
     vec3 red = vec3(1.0, 0.16, 0.42);
     gl_FragColor = vec4(clamp(mix(dim, red, w * 0.6), 0.0, 1.0), 1.0);
@@ -384,7 +451,18 @@ void main() {
     col += (n - 0.5) * uGrain * 0.14 * (1.0 - lg * 0.6);
   }
 
-  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+  col = clamp(col, 0.0, 1.0);
+
+  // Clipping zebras (J): diagonal stripes over blown (red) / crushed (blue)
+  // pixels of the DEVELOPED image — a shader pass, zero CPU compositing.
+  if (uShowClip == 1) {
+    float stripe = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / 12.0));
+    float mx = max(max(col.r, col.g), col.b);
+    if (mx > 0.996) col = mix(col, vec3(1.0, 0.16, 0.3), stripe * 0.85);
+    else if (mx < 0.008) col = mix(col, vec3(0.25, 0.5, 1.0), stripe * 0.85);
+  }
+
+  gl_FragColor = vec4(col, 1.0);
 }
 `
 
@@ -395,14 +473,17 @@ export const EDIT_UNIFORMS = [
   'uCgSh', 'uCgMid', 'uCgHi', 'uCgGlobal', 'uCgParams', 'uCgActive', 'uCompare', 'uSplit',
   'uCrop', 'uFlip', 'uRotate', 'uAspect',
   'uMaskCount', 'uMKind', 'uMGeoA', 'uMGeoB', 'uMAdj0', 'uMAdj1', 'uMAdj2',
-  'uBrushTex', 'uMBrushSel', 'uMaskPreview',
+  'uBrushTex', 'uMBrushSel', 'uRMeta', 'uRGeoA', 'uRGeoB', 'uMRefine', 'uMaskPreview', 'uOverlayMode', 'uShowClip', 'uNeedHi',
   'uDenoiseTex', 'uDenoiseAmt', 'uHasDenoise'
 ] as const
 
 export type EditUniforms = Record<string, WebGLUniformLocation | null>
 
 function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLShader | null {
-  const s = gl.createShader(type)!
+  // Returns null on a lost/exhausted context — bubble that up as a build failure
+  // so the caller degrades, rather than throwing out of a render effect.
+  const s = gl.createShader(type)
+  if (!s) return null
   gl.shaderSource(s, src)
   gl.compileShader(s)
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
@@ -420,7 +501,8 @@ export function buildEditProgram(
   const vs = compile(gl, gl.VERTEX_SHADER, EDIT_VERT)
   const fs = compile(gl, gl.FRAGMENT_SHADER, EDIT_FRAG)
   if (!vs || !fs) return null
-  const prog = gl.createProgram()!
+  const prog = gl.createProgram()
+  if (!prog) return null
   gl.attachShader(prog, vs)
   gl.attachShader(prog, fs)
   gl.linkProgram(prog)
@@ -472,6 +554,11 @@ export function brushStrokeHash(e: EditState): string {
   return parts.join('|')
 }
 
+// Reused bake scratch (see bakeBrushTexture).
+let bakeCanvas: HTMLCanvasElement | null = null
+let bakeCtx: CanvasRenderingContext2D | null = null
+let combinedBuf: Uint8Array | null = null
+
 export function bakeBrushTexture(
   gl: WebGLRenderingContext,
   tex: WebGLTexture,
@@ -492,11 +579,19 @@ export function bakeBrushTexture(
   }
   const W = 768
   const H = Math.max(1, Math.round(W / Math.max(displayAspect, 1e-3)))
-  const canvas = document.createElement('canvas')
-  canvas.width = W
-  canvas.height = H
-  const ctx = canvas.getContext('2d')!
-  const combined = new Uint8Array(W * H * 4)
+  // A bake happens on every pointer move while painting. Allocating a 768×H
+  // canvas and coverage buffer each time made the brush lag behind the cursor,
+  // so both are reused and only re-sized when the aspect actually changes.
+  const canvas = bakeCanvas ?? (bakeCanvas = document.createElement('canvas'))
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W
+    canvas.height = H
+    bakeCtx = null
+  }
+  const ctx = bakeCtx ?? (bakeCtx = canvas.getContext('2d', { willReadFrequently: true })!)
+  if (!combinedBuf || combinedBuf.length !== W * H * 4) combinedBuf = new Uint8Array(W * H * 4)
+  const combined = combinedBuf
+  combined.fill(0)
   for (const { mask, channel } of brushes) {
     ctx.clearRect(0, 0, W, H)
     ctx.fillStyle = '#fff'
@@ -531,7 +626,9 @@ interface RenderOpts {
   split?: number
   imgW: number
   imgH: number
-  maskPreview?: number // slot to show as a red coverage overlay, or -1/undefined
+  maskPreview?: number // slot to show as a coverage overlay, or -1/undefined
+  overlayMode?: number // 0 red · 1 white-on-black · 2 black-on-white
+  showClip?: boolean // zebra-stripe clipped pixels
   hasDenoise?: boolean // a denoised source texture is bound on unit 3
 }
 
@@ -551,6 +648,8 @@ export function setEditUniforms(
   gl.uniform1i(U.uCompare, opts.compare ?? 0)
   gl.uniform1f(U.uSplit, opts.split ?? 0.5)
   gl.uniform1i(U.uMaskPreview, opts.maskPreview ?? -1)
+  gl.uniform1i(U.uOverlayMode, opts.overlayMode ?? 0)
+  gl.uniform1i(U.uShowClip, opts.showClip ? 1 : 0)
   gl.uniform1i(U.uDenoiseTex, 3)
   gl.uniform1f(U.uDenoiseAmt, e.denoise / 100)
   gl.uniform1f(U.uHasDenoise, opts.hasDenoise ? 1 : 0)
@@ -572,8 +671,8 @@ export function setEditUniforms(
   gl.uniform1f(U.uTexture, e.texture / 100)
   gl.uniform1f(U.uGrain, e.grain / 100)
 
-  const hsl = new Float32Array(24)
-  const bandHue = new Float32Array(8)
+  const hsl = SCRATCH.hsl
+  const bandHue = SCRATCH.bandHue
   HSL_BANDS.forEach((b, i) => {
     hsl[i * 3] = e.hsl[b].hue / 100
     hsl[i * 3 + 1] = e.hsl[b].sat / 100
@@ -602,10 +701,14 @@ export function setEditUniforms(
   gl.uniform2f(U.uFlip, e.flipH ? -1 : 1, e.flipV ? -1 : 1)
   gl.uniform1f(U.uRotate, (e.rotate * Math.PI) / 180)
 
-  uploadMaskUniforms(gl, U, e)
+  const masksNeedHi = uploadMaskUniforms(gl, U, e)
+  // Gate the unsharp taps (4 extra develop() calls per pixel) on real demand.
+  const needHi = masksNeedHi || Math.abs(e.clarity) > 0.1 || e.sharpening > 0.1
+  gl.uniform1f(U.uNeedHi, needHi ? 1 : 0)
 }
 
 const MAX_MASKS = 8
+const MAX_REFINE = 8 // shared refinement pool across all masks
 export const MAX_BRUSH_MASKS = 4 // one per RGBA channel of the packed brush texture
 
 // The shader slot of a mask by id (its index among enabled, valid masks in the
@@ -621,7 +724,9 @@ export function maskSlotIndex(e: EditState, id: string | null): number {
     const valid =
       (m.kind === 'radial' && m.radial) ||
       (m.kind === 'linear' && m.linear) ||
-      (m.kind === 'brush' && m.brush && brushIds.has(m.id))
+      (m.kind === 'brush' && m.brush && brushIds.has(m.id)) ||
+      (m.kind === 'lumRange' && m.lum) ||
+      (m.kind === 'colorRange' && m.color)
     if (!valid) continue
     if (m.id === id) return n
     n++
@@ -644,14 +749,23 @@ export function assignBrushChannels(e: EditState): { mask: Mask; channel: number
 
 // Pack enabled masks into the shader's uniform arrays. Radial/linear are fully
 // parametric; brush masks reference a channel of the packed coverage texture.
-function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditState): void {
-  const kind = new Float32Array(MAX_MASKS)
-  const geoA = new Float32Array(MAX_MASKS * 4)
-  const geoB = new Float32Array(MAX_MASKS * 4)
-  const adj0 = new Float32Array(MAX_MASKS * 4)
-  const adj1 = new Float32Array(MAX_MASKS * 4)
-  const adj2 = new Float32Array(MAX_MASKS * 4)
-  const brushSel = new Float32Array(MAX_MASKS * 4)
+// Returns whether any mask consumes the unsharp term (clarity / sharpness).
+function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditState): boolean {
+  const { kind, geoA, geoB, adj0, adj1, adj2, brushSel, rMeta, rGeoA, rGeoB, mRefine } = SCRATCH
+  // Reused across draws, so clear the slots this pass may not write.
+  kind.fill(0)
+  geoA.fill(0)
+  geoB.fill(0)
+  adj0.fill(0)
+  adj1.fill(0)
+  adj2.fill(0)
+  brushSel.fill(0)
+  rMeta.fill(0)
+  rGeoA.fill(0)
+  rGeoB.fill(0)
+  mRefine.fill(0)
+  let needHi = false
+  let pool = 0
   const brushChannel = new Map<string, number>()
   for (const { mask, channel } of assignBrushChannels(e)) brushChannel.set(mask.id, channel)
 
@@ -676,9 +790,56 @@ function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditS
     } else if (m.kind === 'brush' && m.brush && brushChannel.has(m.id)) {
       kind[n] = 2
       brushSel[n * 4 + (brushChannel.get(m.id) as number)] = 1
+    } else if (m.kind === 'lumRange' && m.lum) {
+      kind[n] = 3
+      geoA[n * 4] = m.lum.lo
+      geoA[n * 4 + 1] = m.lum.hi
+      geoA[n * 4 + 2] = m.lum.featherLo
+      geoA[n * 4 + 3] = m.lum.featherHi
+    } else if (m.kind === 'colorRange' && m.color) {
+      kind[n] = 4
+      const ok = srgbToOklab(m.color.rgb[0], m.color.rgb[1], m.color.rgb[2])
+      geoA[n * 4] = ok[0]
+      geoA[n * 4 + 1] = ok[1]
+      geoA[n * 4 + 2] = ok[2]
+      // Map UI-normalized 0..1 onto perceptual Oklab distances: tolerance up to
+      // ~0.35 (distinct hues sit ~0.1–0.3 apart), feather up to ~0.25.
+      geoA[n * 4 + 3] = m.color.tolerance * 0.35
+      geoB[n * 4] = Math.max(m.color.feather * 0.25, 0.004)
     } else {
       continue // malformed / over the brush cap — skip
     }
+    geoB[n * 4 + 2] = m.density ?? 1 // density rides the free geoB.z slot
+
+    // Pack this mask's refinements into the shared pool (silently drops past
+    // the pool cap — MAX_REFINE total across all masks).
+    const start = pool
+    for (const r of m.refine ?? []) {
+      if (pool >= MAX_REFINE) break
+      if (r.kind === 'lumRange' && r.lum) {
+        rMeta[pool * 4] = 3
+        rGeoA[pool * 4] = r.lum.lo
+        rGeoA[pool * 4 + 1] = r.lum.hi
+        rGeoA[pool * 4 + 2] = r.lum.featherLo
+        rGeoA[pool * 4 + 3] = r.lum.featherHi
+      } else if (r.kind === 'colorRange' && r.color) {
+        rMeta[pool * 4] = 4
+        const ok = srgbToOklab(r.color.rgb[0], r.color.rgb[1], r.color.rgb[2])
+        rGeoA[pool * 4] = ok[0]
+        rGeoA[pool * 4 + 1] = ok[1]
+        rGeoA[pool * 4 + 2] = ok[2]
+        rGeoA[pool * 4 + 3] = r.color.tolerance * 0.35
+        rGeoB[pool * 4] = Math.max(r.color.feather * 0.25, 0.004)
+      } else {
+        continue
+      }
+      rMeta[pool * 4 + 1] = r.mode === 'add' ? 0 : r.mode === 'subtract' ? 1 : 2
+      rMeta[pool * 4 + 2] = r.invert ? 1 : 0
+      pool++
+    }
+    mRefine[n * 2] = start
+    mRefine[n * 2 + 1] = pool - start
+
     const a = m.adjust
     adj0[n * 4] = (a.exposure / 100) * 1.5
     adj0[n * 4 + 1] = a.contrast / 100
@@ -690,6 +851,9 @@ function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditS
     adj1[n * 4 + 3] = a.tint / 100
     adj2[n * 4] = a.saturation / 100
     adj2[n * 4 + 1] = a.clarity / 100
+    adj2[n * 4 + 2] = (a.dehaze ?? 0) / 100
+    adj2[n * 4 + 3] = (a.sharpness ?? 0) / 100
+    if (a.clarity !== 0 || (a.sharpness ?? 0) !== 0) needHi = true
     n++
   }
   gl.uniform1i(U.uMaskCount, n)
@@ -700,5 +864,29 @@ function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditS
   gl.uniform4fv(U.uMAdj1, adj1)
   gl.uniform4fv(U.uMAdj2, adj2)
   gl.uniform4fv(U.uMBrushSel, brushSel)
+  gl.uniform4fv(U.uRMeta, rMeta)
+  gl.uniform4fv(U.uRGeoA, rGeoA)
+  gl.uniform4fv(U.uRGeoB, rGeoB)
+  gl.uniform2fv(U.uMRefine, mRefine)
   gl.uniform1i(U.uBrushTex, 2) // texture unit 2
+  return needHi
+}
+
+// Uniform staging buffers. These are rewritten on every draw (twice a frame,
+// counting the histogram pass) — allocating them per call churned ~11 typed
+// arrays a frame for the GC to sweep.
+const SCRATCH = {
+  hsl: new Float32Array(24),
+  bandHue: new Float32Array(8),
+  kind: new Float32Array(MAX_MASKS),
+  geoA: new Float32Array(MAX_MASKS * 4),
+  geoB: new Float32Array(MAX_MASKS * 4),
+  adj0: new Float32Array(MAX_MASKS * 4),
+  adj1: new Float32Array(MAX_MASKS * 4),
+  adj2: new Float32Array(MAX_MASKS * 4),
+  brushSel: new Float32Array(MAX_MASKS * 4),
+  rMeta: new Float32Array(MAX_REFINE * 4),
+  rGeoA: new Float32Array(MAX_REFINE * 4),
+  rGeoB: new Float32Array(MAX_REFINE * 4),
+  mRefine: new Float32Array(MAX_MASKS * 2)
 }

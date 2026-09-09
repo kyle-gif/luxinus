@@ -18,6 +18,24 @@ interface Pending {
 }
 const pending = new Map<string, Pending>()
 
+// The forked process holds the ~90MB model + ORT session in memory. Inference
+// is occasional, so release the whole process after a quiet minute — the next
+// request re-forks and reloads (~1s), a fine trade for a flat memory profile.
+const IDLE_SHUTDOWN_MS = 60_000
+let idleTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleIdleShutdown(): void {
+  if (idleTimer) clearTimeout(idleTimer)
+  idleTimer = setTimeout(() => {
+    idleTimer = null
+    if (pending.size === 0 && worker) {
+      console.log('[onnx] idle — releasing inference process')
+      worker.kill()
+      worker = null
+      ready = null
+    }
+  }, IDLE_SHUTDOWN_MS)
+}
+
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
@@ -47,6 +65,7 @@ function routeMessage(msg: OnnxWorkerResponse): void {
       const p = pending.get(msg.requestId)
       if (p) {
         pending.delete(msg.requestId)
+        if (pending.size === 0) scheduleIdleShutdown()
         p.resolve({
           ok: true,
           rgba: msg.rgba,
@@ -62,6 +81,7 @@ function routeMessage(msg: OnnxWorkerResponse): void {
       const p = pending.get(msg.requestId)
       if (p) {
         pending.delete(msg.requestId)
+        if (pending.size === 0) scheduleIdleShutdown()
         p.resolve({ ok: false, message: msg.message })
       }
       return
@@ -91,6 +111,10 @@ function ensureWorker(): Promise<void> {
   })
   ready = new Promise<void>((resolve) => {
     readyResolve = resolve
+    // If the fork never reports ready (bad native build, missing runtime), fall
+    // through anyway. Awaiting forever pinned the UI at "Denoising… 0%"; letting
+    // the request proceed surfaces a real error the panel can show.
+    setTimeout(resolve, 15_000)
   })
   return ready
 }
@@ -108,6 +132,10 @@ export function registerAiHandlers(): void {
       if (!modelPath) {
         // Graceful: no model on disk → tell the UI so it can hint, don't error.
         return { ok: false, fellBack: true, message: 'Denoise model not installed.' }
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer) // a new request keeps the process alive
+        idleTimer = null
       }
       await ensureWorker()
       const requestId = randomUUID()
@@ -129,6 +157,10 @@ export function registerAiHandlers(): void {
 }
 
 export function shutdownAi(): void {
+  if (idleTimer) {
+    clearTimeout(idleTimer)
+    idleTimer = null
+  }
   worker?.kill()
   worker = null
   ready = null

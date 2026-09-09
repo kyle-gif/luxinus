@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore } from '../../store/useStore'
 import { Button } from '../ui/Button'
 import { Slider } from '../ui/Slider'
@@ -413,6 +413,14 @@ function Section({
   defaultOpen?: boolean
 }): JSX.Element {
   const [open, setOpen] = useState(defaultOpen)
+  // A collapsed section is only clipped by CSS, so its children stayed mounted
+  // and kept working — the tone curve, HSL mixer and preset tiles (each a WebGL
+  // render) all ran on first paint and re-ran on every edit, unseen. Mount on
+  // first open and keep it mounted so the collapse animation still has content.
+  const [mounted, setMounted] = useState(defaultOpen)
+  useEffect(() => {
+    if (open) setMounted(true)
+  }, [open])
   return (
     <section
       className={`overflow-hidden rounded-xl border transition-colors ${
@@ -446,7 +454,7 @@ function Section({
         style={{ gridTemplateRows: open ? '1fr' : '0fr' }}
       >
         <div className="overflow-hidden">
-          <div className="space-y-4 px-3 pb-4 pt-0.5">{children}</div>
+          <div className="space-y-4 px-3 pb-4 pt-0.5">{mounted ? children : null}</div>
         </div>
       </div>
     </section>

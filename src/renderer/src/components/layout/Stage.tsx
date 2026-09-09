@@ -26,11 +26,22 @@ export function Stage(): JSX.Element {
   const cropMode = useStore((s) => s.cropMode)
   const straightening = useStore((s) => s.straightening)
   const wbPicking = useStore((s) => s.wbPicking)
+  const colorPicking = useStore((s) => s.colorPicking)
   const pickWhiteBalance = useStore((s) => s.pickWhiteBalance)
   const selectedMaskId = useStore((s) => s.selectedMaskId)
   const showMaskOverlay = useStore((s) => s.showMaskOverlay)
+  const maskOverlayMode = useStore((s) => s.maskOverlayMode)
+  const showClipping = useStore((s) => s.showClipping)
   const suppressMaskOverlay = useStore((s) => s.suppressMaskOverlay)
   const maskSelected = selectedMaskId !== null
+
+  // The stage has to track the floating panels: they are user-resizable and the
+  // drawer collapses to a 36px rail. Fixed insets left the photo hidden under a
+  // widened drawer, and wasted the space a collapsed one gave back.
+  const stageLeft = useStore((s) => (s.drawerCollapsed ? 36 : s.drawerWidth))
+  const stageRight = useStore((s) => s.panelWidth)
+  // The filmstrip only exists once a folder is open (h-24 = 96px).
+  const stageBottom = useStore((s) => (s.photos.length > 0 ? 96 : 0))
 
   useStageKeyboard()
 
@@ -88,7 +99,7 @@ export function Stage(): JSX.Element {
     clientY: number
     currentTarget: HTMLDivElement
   }): Promise<void> {
-    if (!wbPicking || !proxy.url) return
+    if ((!wbPicking && !colorPicking) || !proxy.url) return
     const rect = e.currentTarget.getBoundingClientRect()
     const nx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
     const ny = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
@@ -120,11 +131,12 @@ export function Stage(): JSX.Element {
       b += d[i + 2]
     }
     const n = d.length / 4
-    pickWhiteBalance(r / n, g / n, b / n)
+    if (colorPicking) useStore.getState().pickMaskColor(r / n, g / n, b / n)
+    else pickWhiteBalance(r / n, g / n, b / n)
   }
 
   function onPanDown(e: ReactPointerEvent<HTMLDivElement>): void {
-    if (wbPicking || view.z <= 1 || interactingOverlay) return
+    if (wbPicking || colorPicking || view.z <= 1 || interactingOverlay) return
     panRef.current = { x: e.clientX, y: e.clientY, ox: view.x, oy: view.y }
     e.currentTarget.setPointerCapture(e.pointerId)
   }
@@ -140,7 +152,11 @@ export function Stage(): JSX.Element {
   const setZoom = (z: number): void => setView(z <= 1 ? { z: 1, x: 0, y: 0 } : (v) => ({ ...v, z }))
 
   return (
-    <div ref={stageRef} className="absolute bottom-24 left-72 right-80 top-12 z-[1] overflow-hidden">
+    <div
+      ref={stageRef}
+      className="absolute top-12 z-[1] overflow-hidden"
+      style={{ left: stageLeft, right: stageRight, bottom: stageBottom }}
+    >
       {/* The ambient background is rendered by the WebGL liquid-glass layer
           beneath; this stage stays transparent so it shows through. */}
       <div className="absolute inset-0 flex items-center justify-center p-10">
@@ -153,12 +169,12 @@ export function Stage(): JSX.Element {
                 onPointerDown={onPanDown}
                 onPointerMove={onPanMove}
                 onPointerUp={onPanUp}
-                onClick={wbPicking ? (e) => void onWbClick(e) : undefined}
+                onClick={wbPicking || colorPicking ? (e) => void onWbClick(e) : undefined}
                 className="relative max-h-full max-w-full overflow-hidden rounded-md shadow-[0_24px_80px_-20px_rgba(0,0,0,0.8)]"
                 style={{
                   aspectRatio: String(displayAspect),
                   transform: `translate(${view.x}px, ${view.y}px) scale(${view.z})`,
-                  cursor: wbPicking
+                  cursor: wbPicking || colorPicking
                     ? 'crosshair'
                     : view.z > 1 && !interactingOverlay
                       ? panRef.current
@@ -173,6 +189,8 @@ export function Stage(): JSX.Element {
                   compareMode={compareMode}
                   splitPos={splitPos}
                   maskPreview={maskPreview}
+                  overlayMode={maskOverlayMode}
+                  showClip={showClipping}
                   denoiseUrl={denoiseUrl}
                   className="block h-full w-full"
                 />
@@ -218,36 +236,44 @@ export function Stage(): JSX.Element {
       {/* Crop toolbar replaces the normal toolbar while cropping. */}
       {photo && cropMode && <CropBar imgAspect={imgAspect} />}
 
-      {/* Selected-photo toolbar (rating + flag + compare + meta). */}
+      {/* Selected-photo toolbar (rating + flag + compare + meta). Kept to a single
+          line — widening the drawer used to squeeze this pill until it wrapped to
+          three rows and swallowed the shortcut hint above it. The max-width leaves
+          clearance on both sides for the zoom control sharing this row. */}
       {photo && !cropMode && (
-        <div className="lx-glass absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3.5 rounded-full px-4 py-1.5">
-          <span className="lx-num text-[11px] text-ink">{photo.fileName}</span>
+        <div className="lx-glass absolute bottom-4 left-1/2 z-10 flex max-w-[calc(100%-19rem)] -translate-x-1/2 flex-nowrap items-center gap-3.5 whitespace-nowrap rounded-full px-4 py-1.5">
+          <span title={photo.fileName} className="lx-num min-w-0 shrink truncate text-[11px] text-ink">
+            {photo.fileName}
+          </span>
           <MetaLine meta={photo.meta} />
-          <StarRating
-            rating={photo.rating}
-            interactive
-            size={14}
-            onChange={(r) => setRating(photo.filePath, r)}
-          />
-          <button
-            onClick={() => setFlag(photo.filePath, !photo.flagged)}
-            title="Flag (P)"
-            className={`text-[13px] transition-colors ${
-              photo.flagged ? 'text-accent-soft' : 'text-muted hover:text-ink'
-            }`}
-          >
-            ⚑
-          </button>
-          <span className="h-3.5 w-px bg-white/10" />
-          <button
-            onClick={() => useStore.getState().setSplit(!splitCompare)}
-            title="Split compare (\\)"
-            className={`text-[11px] transition-colors ${
-              splitCompare ? 'text-accent-soft' : 'text-muted hover:text-ink'
-            }`}
-          >
-            ⊟ Compare
-          </button>
+          {/* The controls hold their size; only the filename and meta give way. */}
+          <div className="flex shrink-0 items-center gap-3.5">
+            <StarRating
+              rating={photo.rating}
+              interactive
+              size={14}
+              onChange={(r) => setRating(photo.filePath, r)}
+            />
+            <button
+              onClick={() => setFlag(photo.filePath, !photo.flagged)}
+              title="Flag (P)"
+              className={`text-[13px] transition-colors ${
+                photo.flagged ? 'text-accent-soft' : 'text-muted hover:text-ink'
+              }`}
+            >
+              ⚑
+            </button>
+            <span className="h-3.5 w-px bg-white/10" />
+            <button
+              onClick={() => useStore.getState().setSplit(!splitCompare)}
+              title="Split compare (\\)"
+              className={`text-[11px] transition-colors ${
+                splitCompare ? 'text-accent-soft' : 'text-muted hover:text-ink'
+              }`}
+            >
+              ⊟ Compare
+            </button>
+          </div>
         </div>
       )}
 
@@ -317,7 +343,9 @@ function MetaLine({ meta }: { meta: PhotoMeta | null }): JSX.Element | null {
   if (meta.cameraModel) parts.push(meta.cameraModel)
   if (meta.iso) parts.push(`ISO ${meta.iso}`)
   if (!parts.length) return null
-  return <span className="lx-num text-[10px] text-faint">{parts.join(' · ')}</span>
+  return (
+    <span className="lx-num shrink truncate text-[10px] text-faint">{parts.join(' · ')}</span>
+  )
 }
 
 function DecodingSpinner({ fileName }: { fileName: string }): JSX.Element {
@@ -406,6 +434,13 @@ function useStageKeyboard(): void {
         if (s.selectedPath) s.setCropMode(!s.cropMode)
         return
       }
+      // Mask overlay: 'O' toggles the coverage overlay, Shift+O cycles its
+      // rendering (red / white-on-black / black-on-white). Masking mode only.
+      if ((e.key === 'o' || e.key === 'O') && !e.metaKey && !e.ctrlKey && s.maskMode) {
+        if (e.shiftKey) s.cycleMaskOverlayMode()
+        else s.setShowMaskOverlay(!s.showMaskOverlay)
+        return
+      }
       if (e.key === 'Escape' && s.cropMode) {
         s.setCropMode(false)
         return
@@ -425,6 +460,11 @@ function useStageKeyboard(): void {
       }
       if (e.key === '\\') {
         s.setSplit(!s.splitCompare)
+        return
+      }
+      // Clipping zebras: red = blown highlights, blue = crushed shadows.
+      if ((e.key === 'j' || e.key === 'J') && !e.metaKey && !e.ctrlKey) {
+        s.setShowClipping(!s.showClipping)
         return
       }
       if (s.selectedPath) {

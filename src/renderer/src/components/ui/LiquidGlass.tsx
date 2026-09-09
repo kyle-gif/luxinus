@@ -182,6 +182,10 @@ export function LiquidGlass(): JSX.Element {
 
     const rectData = new Float32Array(MAXP * 4)
     const radData = new Float32Array(MAXP)
+    // Previous frame's inputs, for the reduced-motion redraw gate below.
+    const lastRect = new Float32Array(MAXP * 4)
+    const lastMouse = { x: NaN, y: NaN }
+    let lastCount = -1
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     const start = performance.now()
     let raf = 0
@@ -190,10 +194,18 @@ export function LiquidGlass(): JSX.Element {
     const radiusCache = new WeakMap<Element, number>()
     let radiusTick = 0
 
+    let tick = 0
     function frame(now: number): void {
+      // Ambient glass doesn't need 60fps: render every other frame (30fps) and
+      // stop entirely while the window is hidden — this loop was a constant
+      // background GPU/CPU cost for a purely decorative layer.
+      if (document.hidden || (tick++ & 1) === 1) {
+        raf = requestAnimationFrame(frame)
+        return
+      }
       // Smoothly ease the light/bulge toward the cursor for a liquid feel.
-      mouse.x += (target.x - mouse.x) * 0.12
-      mouse.y += (target.y - mouse.y) * 0.12
+      mouse.x += (target.x - mouse.x) * 0.22
+      mouse.y += (target.y - mouse.y) * 0.22
 
       const refreshRadii = radiusTick++ % 20 === 0
       const panels = document.querySelectorAll<HTMLElement>('.lx-glass')
@@ -213,6 +225,30 @@ export function LiquidGlass(): JSX.Element {
         rectData[count * 4 + 3] = r.height
         radData[count] = radius
         count++
+      }
+
+      // With motion off the field is static, so a redraw only earns its keep
+      // when the panel geometry or the cursor actually moved. Otherwise this
+      // decorative full-viewport pass burns GPU on an identical frame.
+      if (reduceMotion) {
+        let same = count === lastCount && Math.abs(mouse.x - lastMouse.x) < 0.05 &&
+          Math.abs(mouse.y - lastMouse.y) < 0.05
+        if (same) {
+          for (let i = 0; i < count * 4; i++) {
+            if (rectData[i] !== lastRect[i]) {
+              same = false
+              break
+            }
+          }
+        }
+        if (same) {
+          raf = requestAnimationFrame(frame)
+          return
+        }
+        lastCount = count
+        lastMouse.x = mouse.x
+        lastMouse.y = mouse.y
+        lastRect.set(rectData)
       }
 
       gl.uniform2f(U.res, window.innerWidth, window.innerHeight)

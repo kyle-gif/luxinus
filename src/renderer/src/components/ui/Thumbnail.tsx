@@ -19,7 +19,7 @@ export function Thumbnail({ photo, active, selected = false, onClick, className 
     <button
       onClick={(e) => onClick({ metaKey: e.metaKey, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey })}
       title={photo.fileName}
-      className={`lx-squish group relative overflow-hidden rounded-md border ${
+      className={`lx-squish lx-tile group relative overflow-hidden rounded-md border ${
         active ? 'border-accent' : selected ? 'border-accent/45' : 'border-glass hover:border-white/25'
       } ${className}`}
     >

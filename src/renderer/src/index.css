@@ -183,6 +183,17 @@
     z-index: 1;
   }
 
+  /*
+    Library tiles. A folder can hold thousands of photos and both the drawer grid
+    and the filmstrip render every match, so let the engine skip layout, style and
+    paint for tiles that are scrolled out of view. The intrinsic size keeps the
+    scrollbar honest while they are skipped.
+  */
+  .lx-tile {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 120px;
+  }
+
   /* Drag regions for the frameless window (macOS traffic lights sit on the bar). */
   .lx-drag {
     -webkit-app-region: drag;

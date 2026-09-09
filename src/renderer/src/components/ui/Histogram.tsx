@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useStore } from '../../store/useStore'
 
 // Live RGB histogram scope. EditCanvas renders the edited image into a tiny
@@ -23,26 +24,33 @@ function areaPath(data: number[], max: number): string {
 
 export function Histogram(): JSX.Element {
   const hist = useStore((s) => s.histogram)
-  const channels = hist
-    ? [
-        { key: 'r', color: '#ff5a7a', data: hist.r },
-        { key: 'g', color: '#5ce0a6', data: hist.g },
-        { key: 'b', color: '#6aa8ff', data: hist.b }
-      ]
-    : []
 
-  // Normalize to the tallest bin, but ignore the pure-black/white end bins which
-  // often spike from large flat areas and would flatten everything else.
-  let max = 1
-  let total = 1
-  for (const c of channels) {
-    for (let i = 1; i < c.data.length - 1; i++) if (c.data[i] > max) max = c.data[i]
-    for (const v of c.data) total += v
-  }
-  // Clipping: pixels piled in the darkest / brightest bin (per-channel).
-  const bins = hist ? hist.r.length : 64
-  const clipLow = hist ? (hist.r[0] + hist.g[0] + hist.b[0]) / total : 0
-  const clipHigh = hist ? (hist.r[bins - 1] + hist.g[bins - 1] + hist.b[bins - 1]) / total : 0
+  // The scope updates ~6×/sec; recompute the paths only when the bins actually
+  // change, and build each path once instead of once per fill and once per stroke.
+  const { channels, clipLow, clipHigh } = useMemo(() => {
+    if (!hist) return { channels: [], clipLow: 0, clipHigh: 0 }
+    const raw = [
+      { key: 'r', color: '#ff5a7a', data: hist.r },
+      { key: 'g', color: '#5ce0a6', data: hist.g },
+      { key: 'b', color: '#6aa8ff', data: hist.b }
+    ]
+    // Normalize to the tallest bin, but ignore the pure-black/white end bins which
+    // often spike from large flat areas and would flatten everything else.
+    let max = 1
+    let total = 1
+    for (const c of raw) {
+      for (let i = 1; i < c.data.length - 1; i++) if (c.data[i] > max) max = c.data[i]
+      for (const v of c.data) total += v
+    }
+    // Clipping: pixels piled in the darkest / brightest bin (per-channel).
+    const bins = hist.r.length
+    return {
+      channels: raw.map((c) => ({ ...c, d: areaPath(c.data, max) })),
+      clipLow: (hist.r[0] + hist.g[0] + hist.b[0]) / total,
+      clipHigh: (hist.r[bins - 1] + hist.g[bins - 1] + hist.b[bins - 1]) / total
+    }
+  }, [hist])
+
   const clipColor = (v: number): string =>
     v > 0.02 ? 'text-accent-soft' : v > 0.002 ? 'text-muted' : 'text-faint/40'
 
@@ -55,12 +63,12 @@ export function Histogram(): JSX.Element {
         style={{ mixBlendMode: 'screen' }}
       >
         {channels.map((c) => (
-          <path key={c.key} d={areaPath(c.data, max)} fill={c.color} fillOpacity={0.3} />
+          <path key={c.key} d={c.d} fill={c.color} fillOpacity={0.3} />
         ))}
         {channels.map((c) => (
           <path
             key={c.key + 's'}
-            d={areaPath(c.data, max)}
+            d={c.d}
             fill="none"
             stroke={c.color}
             strokeWidth={0.6}
@@ -74,18 +82,32 @@ export function Histogram(): JSX.Element {
           <div key={i} className="h-full w-px bg-white/[0.04]" />
         ))}
       </div>
-      <span className="lx-eyebrow absolute bottom-1 left-2">rgb</span>
-      {/* clipping indicators — shadows (top-left) / highlights (top-right) */}
-      <span
-        title="Shadow clipping"
-        className={`absolute left-1.5 top-1.5 h-0 w-0 border-y-[3px] border-r-4 border-y-transparent transition-colors ${clipColor(clipLow)}`}
-        style={{ borderRightColor: 'currentColor' }}
-      />
-      <span
-        title="Highlight clipping"
-        className={`absolute right-1.5 top-1.5 h-0 w-0 border-y-[3px] border-l-4 border-y-transparent transition-colors ${clipColor(clipHigh)}`}
-        style={{ borderLeftColor: 'currentColor' }}
-      />
+      {/* Sits over the plot, so it needs its own ground to stay legible. */}
+      <span className="lx-eyebrow absolute bottom-1 left-1.5 rounded bg-black/55 px-1 py-px">
+        rgb
+      </span>
+      {/* clipping indicators — shadows (top-left) / highlights (top-right).
+          Click either (or press J) to toggle the stage zebra overlays. */}
+      <button
+        title="Shadow clipping — click to toggle zebras (J)"
+        onClick={() => useStore.getState().setShowClipping(!useStore.getState().showClipping)}
+        className="absolute left-0 top-0 flex h-6 w-6 items-start justify-start p-1.5"
+      >
+        <span
+          className={`h-0 w-0 border-y-[3px] border-r-4 border-y-transparent transition-colors ${clipColor(clipLow)}`}
+          style={{ borderRightColor: 'currentColor' }}
+        />
+      </button>
+      <button
+        title="Highlight clipping — click to toggle zebras (J)"
+        onClick={() => useStore.getState().setShowClipping(!useStore.getState().showClipping)}
+        className="absolute right-0 top-0 flex h-6 w-6 items-start justify-end p-1.5"
+      >
+        <span
+          className={`h-0 w-0 border-y-[3px] border-l-4 border-y-transparent transition-colors ${clipColor(clipHigh)}`}
+          style={{ borderLeftColor: 'currentColor' }}
+        />
+      </button>
       {!hist && (
         <span className="lx-num absolute inset-0 flex items-center justify-center text-[9px] text-faint">
           waiting for image…

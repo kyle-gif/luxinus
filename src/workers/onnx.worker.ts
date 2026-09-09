@@ -169,7 +169,14 @@ async function denoise(req: Extract<OnnxWorkerRequest, { type: 'denoise' }>): Pr
   }
 }
 
-parent?.on('message', (msg: OnnxWorkerRequest) => {
+// Electron utilityProcess delivers parentPort messages as a MessageEvent — the
+// request is in `e.data`, not the event itself (same pattern as decode.worker).
+// Reading the event as the request silently ignored every message and left the
+// renderer hanging at 0%. The raw-value fallback keeps plain-node harness runs
+// working (they post the request directly).
+parent?.on('message', (e: { data?: OnnxWorkerRequest } | OnnxWorkerRequest) => {
+  const msg = (e && typeof e === 'object' && 'data' in e ? e.data : e) as OnnxWorkerRequest | undefined
+  if (!msg || typeof msg !== 'object' || !('type' in msg)) return
   if (msg.type === 'denoise') {
     denoise(msg).catch((err: Error) =>
       post({ type: 'denoise:error', requestId: msg.requestId, message: err.message })

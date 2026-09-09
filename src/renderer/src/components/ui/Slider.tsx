@@ -125,6 +125,7 @@ export function Slider({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
         onKeyDown={onKeyDown}
         className="lx-slider group relative flex cursor-pointer touch-none items-center"

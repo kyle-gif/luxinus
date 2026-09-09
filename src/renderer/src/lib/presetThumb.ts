@@ -12,6 +12,8 @@ interface Ctx {
   gl: WebGLRenderingContext
   U: EditUniforms
   lutTex: WebGLTexture
+  /** The source photo on unit 0 — reused across photos, never re-created. */
+  srcTex: WebGLTexture
   imgW: number
   imgH: number
 }
@@ -28,7 +30,14 @@ function ensureCtx(): Ctx | null {
   if (!gl) return null
   const built = buildEditProgram(gl)
   if (!built) return null
-  ctx = { gl, U: built.U, lutTex: gl.createTexture()!, imgW: 1, imgH: 1 }
+  ctx = {
+    gl,
+    U: built.U,
+    lutTex: gl.createTexture()!,
+    srcTex: gl.createTexture()!,
+    imgW: 1,
+    imgH: 1
+  }
   return ctx
 }
 
@@ -47,9 +56,10 @@ export async function setPresetSource(key: string, url: string): Promise<void> {
   if (!c || sourceKey === key) return
   const img = await loadImage(url)
   const { gl } = c
-  const tex = gl.createTexture()
+  // One texture for the life of the context — creating a new one per photo (and
+  // never deleting the old) leaked a proxy-sized allocation on every selection.
   gl.activeTexture(gl.TEXTURE0)
-  gl.bindTexture(gl.TEXTURE_2D, tex)
+  gl.bindTexture(gl.TEXTURE_2D, c.srcTex)
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)

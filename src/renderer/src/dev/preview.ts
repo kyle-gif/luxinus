@@ -1,5 +1,5 @@
 import { useStore } from '../store/useStore'
-import { defaultEditState, type PhotoVM } from '../types'
+import { defaultEditState, zeroMaskAdjust, type PhotoVM } from '../types'
 // Bundled only when this dev module is included (tree-shaken from production).
 import testPhoto from './test-photo.jpg?url'
 
@@ -11,6 +11,8 @@ export function enablePreview(): void {
   if (typeof window === 'undefined') return
   if ((window as { luxinus?: unknown }).luxinus) return
   const search = window.location.search
+  // Handle for the design-review harness to drive the store from the outside.
+  ;(window as unknown as { __lxStore?: unknown }).__lxStore = useStore
   if (search.includes('empty')) return
   const photos: PhotoVM[] = Array.from({ length: 9 }, (_, i) => ({
     filePath: `/Pictures/2026-07/IMG_${2040 + i}.RAW`,
@@ -55,10 +57,7 @@ export function enablePreview(): void {
 
   // ?mask — inject sample radial + linear masks (dev only) to review shader output.
   if (search.includes('mask')) {
-    const zero = {
-      exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
-      temperature: 0, tint: 0, saturation: 0, clarity: 0
-    }
+    const zero = zeroMaskAdjust()
     useStore.getState().setEdit({
       masks: [
         {
@@ -81,10 +80,7 @@ export function enablePreview(): void {
   // ?brush — inject a brush mask with a painted stroke (dev only) to review the
   // brush coverage texture + painting overlay.
   if (search.includes('brush')) {
-    const zero = {
-      exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
-      temperature: 0, tint: 0, saturation: 0, clarity: 0
-    }
+    const zero = zeroMaskAdjust()
     const pts = Array.from({ length: 12 }, (_, i) => ({ x: 0.25 + i * 0.04, y: 0.55 + Math.sin(i * 0.6) * 0.08 }))
     useStore.getState().setEdit({
       masks: [
@@ -97,6 +93,74 @@ export function enablePreview(): void {
     })
     useStore.getState().selectMask('b1')
   }
+
+  // ?lumrange — inject a luminance-range mask pulling highlights down (the DR
+  // recovery case) so the shader branch + range UI can be reviewed (dev only).
+  // &wb / &bw switch the overlay to white-on-black / black-on-white.
+  if (search.includes('lumrange')) {
+    const zero = zeroMaskAdjust()
+    const density = params.get('density') ? Number(params.get('density')) / 100 : undefined
+    useStore.getState().setEdit({
+      masks: [
+        {
+          id: 'lr1', kind: 'lumRange', name: 'Luminance 1', enabled: true, density,
+          adjust: { ...zero, exposure: -55, highlights: -60, saturation: 15 },
+          lum: { lo: 0.72, hi: 1, featherLo: 0.18, featherHi: 0.02 }
+        }
+      ]
+    })
+    useStore.getState().selectMask('lr1')
+    useStore.getState().setMaskMode(true)
+    if (search.includes('wb')) useStore.setState({ maskOverlayMode: 1 })
+    if (search.includes('bw')) useStore.setState({ maskOverlayMode: 2 })
+    if (search.includes('nooverlay')) useStore.getState().setShowMaskOverlay(false)
+  }
+
+  // ?refine — a combined mask: bright tones MINUS the sky blue → isolates the
+  // sun/moon discs. Verifies the refinement fold (dev only).
+  if (search.includes('refine')) {
+    const zero = zeroMaskAdjust()
+    useStore.getState().setEdit({
+      masks: [
+        {
+          id: 'rf1', kind: 'lumRange', name: 'Luminance 1', enabled: true,
+          adjust: { ...zero, exposure: -70 },
+          lum: { lo: 0.6, hi: 1, featherLo: 0.1, featherHi: 0.02 },
+          refine: [
+            {
+              id: 'rf1a', kind: 'colorRange', mode: 'subtract', invert: false,
+              color: { rgb: [120, 165, 230], tolerance: 0.45, feather: 0.3 }
+            }
+          ]
+        }
+      ]
+    })
+    useStore.getState().selectMask('rf1')
+    useStore.getState().selectRefine('rf1a')
+    useStore.getState().setMaskMode(true)
+    if (search.includes('nooverlay')) useStore.getState().setShowMaskOverlay(false)
+  }
+
+  // ?colorrange — inject a color-range mask sampled on the sky blue so the
+  // Oklab distance branch + controls can be reviewed (dev only).
+  if (search.includes('colorrange')) {
+    const zero = zeroMaskAdjust()
+    useStore.getState().setEdit({
+      masks: [
+        {
+          id: 'cr1', kind: 'colorRange', name: 'Color 1', enabled: true,
+          adjust: { ...zero, saturation: -70, exposure: 20 },
+          color: { rgb: [80, 140, 225], tolerance: 0.35, feather: 0.3 }
+        }
+      ]
+    })
+    useStore.getState().selectMask('cr1')
+    useStore.getState().setMaskMode(true)
+    if (search.includes('nooverlay')) useStore.getState().setShowMaskOverlay(false)
+  }
+
+  // ?zebra — enable the clipping zebra overlays (dev only).
+  if (search.includes('zebra')) useStore.getState().setShowClipping(true)
 
   // ?grade — seed a teal-shadow / warm-highlight color grade to verify the
   // color-grading shader pass + wheels (dev only).

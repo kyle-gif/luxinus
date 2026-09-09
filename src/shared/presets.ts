@@ -1,4 +1,4 @@
-import { defaultEditState, type EditState } from './edits'
+import { coerceEditState, defaultEditState, type EditState } from './edits'
 
 // Presets — reusable "looks". A preset stores the tonal/colour/curve/HSL/detail/
 // effects state but NOT geometry (crop/rotate/flip are photo-specific), so
@@ -29,9 +29,10 @@ export function captureAsPreset(edit: EditState): EditState {
 }
 
 // Apply a preset to the current edit, preserving the photo's geometry.
+// coerce runs first so presets saved by older schema versions apply cleanly.
 export function applyPreset(current: EditState, preset: Preset): EditState {
   return {
-    ...preset.edits,
+    ...coerceEditState(preset.edits),
     crop: current.crop,
     rotate: current.rotate,
     flipH: current.flipH,

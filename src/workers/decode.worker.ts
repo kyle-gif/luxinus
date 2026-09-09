@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import fss, { type Dirent } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import sharp from 'sharp'
@@ -34,6 +35,15 @@ import {
   type WorkerRequest,
   type WorkerResponse
 } from '../shared/library'
+
+// libvips defaults to one thread per core and a generous pixel cache — right
+// for a batch server, wasteful for a photo browser. Scale modestly with the
+// machine (2 on a dual-core, up to 4 on a big one) so folder loading uses the
+// hardware without letting RAW decodes fan out into an OOM; the bounded queue
+// below caps parallel decodes on top of this.
+const CPUS = Math.max(1, os.cpus()?.length ?? 4)
+sharp.concurrency(Math.min(4, Math.max(2, CPUS >> 1)))
+sharp.cache({ memory: 64, files: 0, items: 256 })
 
 // ── utilityProcess message port ─────────────────────────────────────────────
 interface ParentPort {
@@ -69,6 +79,7 @@ function initCache(cacheDir: string): void {
   fss.mkdirSync(cacheDir, { recursive: true })
   proxyDir = path.join(cacheDir, 'proxies')
   fss.mkdirSync(proxyDir, { recursive: true })
+  void pruneProxyCache()
   db = new Database(path.join(cacheDir, 'library.sqlite'))
   db.pragma('journal_mode = WAL')
   db.exec(`
@@ -83,6 +94,39 @@ function initCache(cacheDir: string): void {
       flagged INTEGER NOT NULL DEFAULT 0
     )
   `)
+}
+
+// Proxies are keyed by path+mtime, so editing or re-saving a photo strands its
+// old proxy on disk forever. Trim the cache to a bounded size at startup, oldest
+// first — every entry is reproducible, so evicting one only costs a re-decode.
+const PROXY_CACHE_MAX_BYTES = 2 * 1024 ** 3
+
+async function pruneProxyCache(): Promise<void> {
+  try {
+    const names = await fs.readdir(proxyDir)
+    const files = (
+      await Promise.all(
+        names
+          .filter((n) => n.endsWith('.webp'))
+          .map(async (n) => {
+            const full = path.join(proxyDir, n)
+            const st = await fs.stat(full).catch(() => null)
+            return st ? { full, size: st.size, atime: st.atimeMs } : null
+          })
+      )
+    ).filter((f): f is { full: string; size: number; atime: number } => f !== null)
+
+    let total = files.reduce((n, f) => n + f.size, 0)
+    if (total <= PROXY_CACHE_MAX_BYTES) return
+    files.sort((a, b) => a.atime - b.atime) // least recently used first
+    for (const f of files) {
+      if (total <= PROXY_CACHE_MAX_BYTES) break
+      await fs.unlink(f.full).catch(() => {})
+      total -= f.size
+    }
+  } catch {
+    /* cache hygiene is best-effort — never block startup on it */
+  }
 }
 
 interface PhotoRow {
@@ -152,6 +196,11 @@ interface RawEntry {
   size: number
 }
 
+// How many stat() calls to have in flight at once. Awaiting them one by one
+// makes the scan latency-bound on a large folder; unbounded fan-out exhausts
+// file descriptors. A fixed window gets the throughput without the risk.
+const STAT_BATCH = 64
+
 async function walk(dir: string, out: RawEntry[], depth: number): Promise<void> {
   if (depth > 12) return
   let entries: Dirent[]
@@ -160,29 +209,38 @@ async function walk(dir: string, out: RawEntry[], depth: number): Promise<void> 
   } catch {
     return // unreadable directory — skip, never crash the scan
   }
+  const subdirs: string[] = []
+  const candidates: { full: string; name: string; ext: string }[] = []
   for (const e of entries) {
     if (e.name.startsWith('.')) continue
     const full = path.join(dir, e.name)
     if (e.isDirectory()) {
-      await walk(full, out, depth + 1)
+      subdirs.push(full)
     } else if (e.isFile()) {
       const ext = path.extname(e.name)
-      if (!isSupportedExt(ext)) continue
-      try {
-        const st = await fs.stat(full)
-        out.push({
-          filePath: full,
-          fileName: e.name,
-          ext: ext.toLowerCase(),
-          isRaw: isRawExt(ext),
-          mtimeMs: Math.round(st.mtimeMs),
-          size: st.size
-        })
-      } catch {
-        /* stat failed — skip file */
-      }
+      if (isSupportedExt(ext)) candidates.push({ full, name: e.name, ext })
     }
   }
+  for (let i = 0; i < candidates.length; i += STAT_BATCH) {
+    const slice = candidates.slice(i, i + STAT_BATCH)
+    const stats = await Promise.all(
+      slice.map((c) => fs.stat(c.full).catch(() => null)) // stat failed — skip file
+    )
+    for (let j = 0; j < slice.length; j++) {
+      const st = stats[j]
+      if (!st) continue
+      const c = slice[j]
+      out.push({
+        filePath: c.full,
+        fileName: c.name,
+        ext: c.ext.toLowerCase(),
+        isRaw: isRawExt(c.ext),
+        mtimeMs: Math.round(st.mtimeMs),
+        size: st.size
+      })
+    }
+  }
+  for (const sub of subdirs) await walk(sub, out, depth + 1)
 }
 
 async function scanAsync(folderPath: string): Promise<LibraryPhoto[]> {
@@ -193,16 +251,22 @@ async function scanAsync(folderPath: string): Promise<LibraryPhoto[]> {
     `SELECT mtime, width, height, camera_make, camera_model, iso, aperture, shutter, focal,
             captured_at, rating, flagged FROM photos WHERE path = ?`
   )
-  return files.map((f) => {
-    ensureRow(f.filePath, f.mtimeMs)
-    const row = read.get(f.filePath) as PhotoRow | undefined
-    return {
-      ...f,
-      meta: rowToMeta(row),
-      rating: row?.rating ?? 0,
-      flagged: !!row?.flagged
-    }
-  })
+  const insert = db.prepare('INSERT OR IGNORE INTO photos(path, mtime) VALUES (?, ?)')
+  // One transaction for the whole folder. Left implicit, each INSERT is its own
+  // WAL commit — on a few thousand photos that fsync storm dominates the open.
+  const collect = db.transaction((entries: RawEntry[]): LibraryPhoto[] =>
+    entries.map((f) => {
+      insert.run(f.filePath, f.mtimeMs)
+      const row = read.get(f.filePath) as PhotoRow | undefined
+      return {
+        ...f,
+        meta: rowToMeta(row),
+        rating: row?.rating ?? 0,
+        flagged: !!row?.flagged
+      }
+    })
+  )
+  return collect(files)
 }
 
 // ── decode ──────────────────────────────────────────────────────────────────
@@ -254,10 +318,13 @@ async function decode(filePath: string, longEdge: number): Promise<{ webp: Buffe
   return { webp, meta: res.meta }
 }
 
-async function handleThumbnail(
+// A cache hit is a single synchronous SQLite read — it must NOT wait behind the
+// decode queue, or reopening a known folder trickles in at decode speed instead
+// of appearing at once.
+function cachedThumbnail(
   filePath: string,
   mtimeMs: number
-): Promise<{ webp: Buffer; meta: PhotoMeta }> {
+): { webp: Buffer; meta: PhotoMeta } | null {
   const row = db
     .prepare(
       `SELECT mtime, width, height, camera_make, camera_model, iso, aperture, shutter, focal,
@@ -267,6 +334,15 @@ async function handleThumbnail(
   if (row?.thumb && row.mtime === mtimeMs && row.width != null) {
     return { webp: row.thumb, meta: rowToMeta(row)! }
   }
+  return null
+}
+
+async function handleThumbnail(
+  filePath: string,
+  mtimeMs: number
+): Promise<{ webp: Buffer; meta: PhotoMeta }> {
+  const hit = cachedThumbnail(filePath, mtimeMs)
+  if (hit) return hit
   const { webp, meta } = await decode(filePath, THUMB_LONG_EDGE)
   writeMetaAndThumb(filePath, mtimeMs, meta, webp)
   return { webp, meta }
@@ -299,8 +375,9 @@ interface Job {
 }
 const queue: Job[] = []
 // Bounded concurrency: a little parallelism speeds folder loading, but stays
-// small so RAW decodes (each a libraw worker) can't fan out into an OOM.
-const MAX_CONCURRENCY = 2
+// small so RAW decodes (each a libraw worker) can't fan out into an OOM. Scaled
+// to the machine within a hard 2..4 band.
+const MAX_CONCURRENCY = Math.min(4, Math.max(2, CPUS >> 1))
 let active = 0
 
 function enqueue(job: Job): void {
@@ -342,7 +419,19 @@ parentPort.on('message', (e) => {
         )
       break
 
-    case 'thumbnail':
+    case 'thumbnail': {
+      // Fast path: already cached → answer now, never queue.
+      const hit = cachedThumbnail(msg.filePath, msg.mtimeMs)
+      if (hit) {
+        post({
+          kind: 'thumbnail:result',
+          requestId: msg.requestId,
+          filePath: msg.filePath,
+          webp: new Uint8Array(hit.webp),
+          meta: hit.meta
+        })
+        break
+      }
       enqueue({
         priority: false,
         run: async () => {
@@ -361,6 +450,7 @@ parentPort.on('message', (e) => {
         }
       })
       break
+    }
 
     case 'proxy':
       enqueue({
