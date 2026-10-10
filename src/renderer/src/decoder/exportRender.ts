@@ -2,6 +2,7 @@ import LibRaw from 'libraw-wasm'
 import bricolage from '../assets/fonts/bricolage.woff2?url'
 import geistMono from '../assets/fonts/geistmono.woff2?url'
 import { bakeBrushTexture, buildEditProgram, setEditUniforms, uploadCurveLut } from '../lib/editShader'
+import { bakeSemanticTexture } from '../lib/semanticAtlas'
 import type { ExportRenderRequest, ExportRenderResult, FrameField, FrameStyle } from '../../../shared/export'
 
 // Full-resolution export render, run inside the hidden Chromium window (its
@@ -29,9 +30,12 @@ async function sourceToCanvas(req: ExportRenderRequest): Promise<{
   tex: (gl: WebGLRenderingContext) => WebGLTexture
   w: number
   h: number
+  rgba: () => Uint8Array
+  dispose: () => void
 }> {
   if (req.isRaw) {
     const raw = new LibRaw()
+    try {
     await raw.open(new Uint8Array(req.bytes), {
       useCameraWb: true,
       outputColor: 1,
@@ -40,7 +44,6 @@ async function sourceToCanvas(req: ExportRenderRequest): Promise<{
       halfSize: false // full resolution for export
     })
     const img = await raw.imageData()
-    raw.dispose()
     if (!img || !img.data) throw new Error('RAW decode produced no pixels')
     const w = img.width
     const h = img.height
@@ -49,6 +52,17 @@ async function sourceToCanvas(req: ExportRenderRequest): Promise<{
     return {
       w,
       h,
+      rgba: () => {
+        const pixels = new Uint8Array(w * h * 4)
+        for (let i = 0; i < w * h; i++) {
+          pixels[i * 4] = data[i * channels]
+          pixels[i * 4 + 1] = data[i * channels + 1]
+          pixels[i * 4 + 2] = data[i * channels + 2]
+          pixels[i * 4 + 3] = channels === 4 ? data[i * channels + 3] : 255
+        }
+        return pixels
+      },
+      dispose: () => {},
       tex: (gl) => {
         const t = gl.createTexture()!
         gl.activeTexture(gl.TEXTURE0)
@@ -60,6 +74,7 @@ async function sourceToCanvas(req: ExportRenderRequest): Promise<{
         return t
       }
     }
+    } finally { raw.dispose() }
   }
 
   // Standard formats: Chromium decodes JPEG/PNG/WebP (and TIFF/HEIF are
@@ -68,6 +83,8 @@ async function sourceToCanvas(req: ExportRenderRequest): Promise<{
   return {
     w: bmp.width,
     h: bmp.height,
+    rgba: () => readback(bmp, bmp.width, bmp.height).rgba,
+    dispose: () => bmp.close(),
     tex: (gl) => {
       const t = gl.createTexture()!
       gl.activeTexture(gl.TEXTURE0)
@@ -107,23 +124,49 @@ export async function exportRender(req: ExportRenderRequest): Promise<ExportRend
   glCanvas.height = outH
   const gl = glCanvas.getContext('webgl', { preserveDrawingBuffer: true })
   if (!gl) throw new Error('WebGL unavailable for export')
+  try {
   const built = buildEditProgram(gl)
   if (!built) throw new Error('export shader build failed')
+  if (Math.max(src.w, src.h, outW, outH) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) {
+    throw new Error('사진 크기가 현재 GPU의 최대 텍스처 크기를 초과합니다.')
+  }
   src.tex(gl)
+  const restoredTexture = gl.createTexture()!
+  gl.activeTexture(gl.TEXTURE3)
+  gl.bindTexture(gl.TEXTURE_2D, restoredTexture)
+  texParams(gl)
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]))
+  let hasDenoise = false
+  if (e.denoise > 0) {
+    const restored = await window.luxDecoder.restore({ id: req.id, rgba: src.rgba(), width: src.w, height: src.h, strength: 100 })
+    if (!restored.ok || !restored.rgba) {
+      throw new Error(restored.message ?? 'RGB 복원에 실패하여 내보내기를 중단했습니다.')
+    }
+    gl.activeTexture(gl.TEXTURE3)
+    gl.bindTexture(gl.TEXTURE_2D, restoredTexture)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, src.w, src.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, restored.rgba)
+    hasDenoise = true
+  }
+  src.dispose()
   const lutTex = gl.createTexture()!
   const useLut = uploadCurveLut(gl, lutTex, e)
   const brushTex = gl.createTexture()!
-  bakeBrushTexture(gl, brushTex, e, outW / outH)
+  bakeBrushTexture(gl, brushTex, e, src.w / src.h)
+  bakeSemanticTexture(gl, gl.createTexture()!, e)
   gl.viewport(0, 0, outW, outH)
-  setEditUniforms(gl, built.U, e, useLut, { imgW: src.w, imgH: src.h, compare: 0 })
+  setEditUniforms(gl, built.U, e, useLut, { imgW: src.w, imgH: src.h, compare: 0, hasDenoise })
   gl.drawArrays(gl.TRIANGLES, 0, 3)
 
-  // Composite to a 2D canvas (upright), adding the frame if requested.
-  if (req.frame) {
-    await ensureFonts()
-    return frameComposite(glCanvas, outW, outH, req.frame.style, req.frame.fields)
+    // Composite while the context is alive; release every export-only resource.
+    if (req.frame) {
+      await ensureFonts()
+      return frameComposite(glCanvas, outW, outH, req.frame.style, req.frame.fields)
+    }
+    return readback(glCanvas, outW, outH)
+  } finally {
+    src.dispose()
+    gl.getExtension('WEBGL_lose_context')?.loseContext()
   }
-  return readback(glCanvas, outW, outH)
 }
 
 function readback(source: CanvasImageSource, w: number, h: number): ExportRenderResult {

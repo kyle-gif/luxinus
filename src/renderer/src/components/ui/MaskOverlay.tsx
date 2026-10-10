@@ -1,5 +1,6 @@
-import { useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useStore } from '../../store/useStore'
+import { useEditGesture } from '../../lib/useEditGesture'
 
 // Interactive geometry for the selected radial/linear mask, laid over the image.
 // Coordinates are normalized 0..1 in the displayed (post-crop) view space — the
@@ -14,6 +15,8 @@ export function MaskOverlay(): JSX.Element | null {
   const mask = useStore((s) => s.edit.masks.find((m) => m.id === id) ?? null)
   const updateMask = useStore((s) => s.updateMask)
   const drag = useRef<{ kind: string; sx: number; sy: number; g: unknown } | null>(null)
+  const { begin: beginGesture, end: endGesture, isActive } = useEditGesture()
+  useEffect(() => () => { drag.current = null; endGesture() }, [id, endGesture])
 
   if (!mask || (mask.kind !== 'radial' && mask.kind !== 'linear')) return null
 
@@ -23,6 +26,7 @@ export function MaskOverlay(): JSX.Element | null {
   }
   function begin(kind: string) {
     return (e: ReactPointerEvent<HTMLDivElement>): void => {
+      if (!beginGesture()) return
       e.stopPropagation()
       const [sx, sy] = toNorm(e)
       drag.current = { kind, sx, sy, g: mask!.kind === 'radial' ? mask!.radial : mask!.linear }
@@ -31,7 +35,7 @@ export function MaskOverlay(): JSX.Element | null {
   }
   function onMove(e: ReactPointerEvent<HTMLDivElement>): void {
     const d = drag.current
-    if (!d || !mask) return
+    if (!d || !mask || !isActive()) return
     const [nx, ny] = toNorm(e)
 
     if (mask.kind === 'radial' && mask.radial) {
@@ -60,7 +64,8 @@ export function MaskOverlay(): JSX.Element | null {
   }
   function onUp(e: ReactPointerEvent<HTMLDivElement>): void {
     drag.current = null
-    rootRef.current?.releasePointerCapture?.(e.pointerId)
+    endGesture()
+    if (rootRef.current?.hasPointerCapture(e.pointerId)) rootRef.current.releasePointerCapture(e.pointerId)
   }
 
   const pc = (v: number): string => `${v * 100}%`
@@ -71,6 +76,8 @@ export function MaskOverlay(): JSX.Element | null {
       className="absolute inset-0 z-10 touch-none select-none"
       onPointerMove={onMove}
       onPointerUp={onUp}
+      onPointerCancel={onUp}
+      onLostPointerCapture={onUp}
     >
       {mask.kind === 'radial' && mask.radial && (
         <RadialGizmo r={mask.radial} pc={pc} begin={begin} />

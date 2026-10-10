@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { SaveQueue } from '../lib/saveQueue'
 import {
   DEFAULT_FILTER,
   coerceEditState,
@@ -24,6 +25,7 @@ import {
   type ProxyState
 } from '../types'
 import { applyPreset, type Preset } from '../../../shared/presets'
+import { validateSemanticGeom, SEMANTIC_MAX_MASKS, type PortraitRegionResult } from '../../../shared/portrait'
 
 function webpToUrl(bytes: Uint8Array): string {
   // Copy into a fresh ArrayBuffer so the Blob owns its memory.
@@ -51,21 +53,6 @@ function loadImageEl(url: string): Promise<HTMLImageElement> {
 }
 
 const IDLE_PROXY: ProxyState = { filePath: null, url: null, status: 'idle', message: null }
-
-// Debounced sidecar autosave — coalesces rapid slider changes into one write.
-const saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
-function scheduleSave(filePath: string, edit: EditState): void {
-  if (!window.luxinus) return
-  const prev = saveTimers.get(filePath)
-  if (prev) clearTimeout(prev)
-  saveTimers.set(
-    filePath,
-    setTimeout(() => {
-      saveTimers.delete(filePath)
-      window.luxinus.edits.save(filePath, edit).catch(() => {})
-    }, 450)
-  )
-}
 
 // Resizable panel widths (px), persisted between sessions.
 const DRAWER_MIN = 220
@@ -130,6 +117,7 @@ interface LuxinusState {
   selectedMaskId: string | null
   selectMask: (id: string | null) => void
   addMask: (kind: MaskKind) => void
+  addSemanticMasks: (photoId: string, regions: PortraitRegionResult[]) => void
   // One-click DR masks: pre-aimed luminance ranges at the clipped ends.
   // Thresholds stay adjustable afterwards — they're just the range handles.
   addQuickMask: (preset: 'blown' | 'crushed') => void
@@ -164,6 +152,19 @@ interface LuxinusState {
   photos: PhotoVM[]
   selectedPath: string | null
   loadingLibrary: boolean
+  libraryError: string | null
+  editLoading: boolean
+  saveStatus: 'idle' | 'pending' | 'saving' | 'saved' | 'error'
+  saveError: string | null
+  flushSaves: () => Promise<boolean>
+  retrySave: () => Promise<boolean>
+  reloadCurrentEdits: () => Promise<void>
+  editGestureActive: boolean
+  beginEditGesture: () => void
+  endEditGesture: () => void
+  previewEdit: EditState | null
+  setPreviewEdit: (edit: EditState | null) => void
+  applyAgentEdit: (result: { photoId: string; baseEdit: EditState; edit: EditState; saved: true }) => boolean
   filter: FilterState
   setFilter: (patch: Partial<FilterState>) => void
   editedPaths: Set<string> // photos with non-default edits (thumbnail badge)
@@ -177,7 +178,7 @@ interface LuxinusState {
   // Multi-selection for batch operations (the active photo — selectedPath — is
   // always a member). Cmd/Ctrl toggles, Shift extends a range.
   selection: Set<string>
-  pickPhoto: (filePath: string, mods: { meta: boolean; shift: boolean }) => void
+  pickPhoto: (filePath: string, mods: { meta: boolean; shift: boolean; order?: string[] }) => void
   clearSelection: () => void
   // Copy the current develop settings (minus framing) onto every selected photo's
   // sidecar. Returns how many were written.
@@ -226,6 +227,8 @@ interface LuxinusState {
     status: 'idle' | 'running' | 'ready' | 'error'
     progress: number
     message: string | null
+    cacheStatus: 'none' | 'pending' | 'stored' | 'hit' | 'error'
+    cacheMessage: string | null
   }
   runDenoise: () => Promise<void>
   clearDenoise: () => void
@@ -259,6 +262,14 @@ interface LuxinusState {
 }
 
 export const useStore = create<LuxinusState>((set, get) => {
+  const saves = new SaveQueue<EditState>(
+    (path, edit) => window.luxinus.edits.save(path, edit),
+    (saveStatus, saveError) => set({ saveStatus, saveError })
+  )
+  let photoRequest = 0
+  let restorationRequest = 0
+  let folderRequest = 0
+  let gestureDepth = 0
   // ── Undo/redo history ──────────────────────────────────────────────────────
   // A drag fires commitEdit on every tick; we don't want 100 undo steps per
   // drag. So we hold a `baseline` (the state at the last checkpoint) and only
@@ -278,15 +289,16 @@ export const useStore = create<LuxinusState>((set, get) => {
   }
   function scheduleCheckpoint(): void {
     if (histTimer) clearTimeout(histTimer)
-    histTimer = setTimeout(checkpointNow, 450)
+    if (!gestureDepth) histTimer = setTimeout(checkpointNow, 450)
   }
   function resetHistory(edit: EditState): void {
     if (histTimer) {
       clearTimeout(histTimer)
       histTimer = null
     }
+    gestureDepth = 0
     histBaseline = edit
-    set({ undoStack: [], redoStack: [] })
+    set({ undoStack: [], redoStack: [], editGestureActive: false })
   }
 
   // Snapshots persist per-photo for the life of the session.
@@ -300,15 +312,19 @@ export const useStore = create<LuxinusState>((set, get) => {
       const next = new Set(s.editedPaths)
       if (isEdited(edit)) next.add(path)
       else next.delete(path)
-      return { edit, editedPaths: next }
+      return { edit, previewEdit: null, editedPaths: next }
     })
-    scheduleSave(path, edit)
+    if (window.luxinus) saves.schedule(path, edit)
   }
 
   // After a user edit: write it, then schedule a coalesced history checkpoint.
+  function restoreSavedPreview(): void {
+    const state = get()
+    if (!state.editLoading && state.proxy.status === 'ready' && state.edit.denoise > 0 && state.denoiseProxy.status === 'idle') void state.runDenoise()
+  }
   function commitEdit(edit: EditState): void {
-    if (!get().selectedPath) return
-    writeEdit(edit)
+    if (!get().selectedPath || get().editLoading) return
+    writeEdit(coerceEditState(edit))
     scheduleCheckpoint()
   }
 
@@ -384,6 +400,8 @@ export const useStore = create<LuxinusState>((set, get) => {
     selectedMaskId: null,
     selectMask: (id) => set({ selectedMaskId: id, selectedRefineId: null }),
     addMask: (kind) => {
+      if (kind === 'semantic' || get().edit.masks.length >= SEMANTIC_MAX_MASKS) return
+      if (kind === 'brush' && get().edit.masks.filter(mask => mask.enabled && mask.kind === 'brush').length >= 4) return
       const geom =
         kind === 'radial'
           ? { radial: { cx: 0.5, cy: 0.5, rx: 0.28, ry: 0.34, feather: 0.5, invert: false } }
@@ -398,11 +416,12 @@ export const useStore = create<LuxinusState>((set, get) => {
       const e = get().edit
       const count = e.masks.filter((m) => m.kind === kind).length + 1
       const LABELS: Record<MaskKind, string> = {
-        radial: 'Radial',
-        linear: 'Linear',
-        brush: 'Brush',
-        lumRange: 'Luminance',
-        colorRange: 'Color'
+        radial: '타원',
+        linear: '그라데이션',
+        brush: '브러시',
+        lumRange: '밝기',
+        colorRange: '색상',
+        semantic: '인물'
       }
       const label = LABELS[kind]
       const mask: Mask = {
@@ -418,7 +437,23 @@ export const useStore = create<LuxinusState>((set, get) => {
       // IS the mask, so picking it is the natural first step.
       set({ selectedMaskId: mask.id, colorPicking: kind === 'colorRange' })
     },
+    addSemanticMasks: (photoId, regions) => {
+      const state = get()
+      if (state.selectedPath !== photoId || state.editLoading || state.syncing || state.editGestureActive) throw new Error('사진이나 보정 상태가 바뀌었습니다. 다시 선택해 주세요.')
+      if (!regions.length || state.edit.masks.length + regions.length > SEMANTIC_MAX_MASKS) throw new Error('선택 영역은 사진 한 장에 최대 16개까지 사용할 수 있습니다.')
+      const photo = state.photos.find(item => item.filePath === photoId)
+      for (const item of regions) {
+        validateSemanticGeom(item.semantic)
+        if (!photo || item.semantic.source.mtimeMs !== photo.mtimeMs || item.semantic.source.size !== photo.size) throw new Error('사진 파일이 바뀌었습니다. 다시 분석해 주세요.')
+      }
+      const masks: Mask[] = regions.map(item => ({ id: crypto.randomUUID(), name: item.label, kind: 'semantic', enabled: true, density: 1, adjust: zeroMaskAdjust(), semantic: item.semantic }))
+      checkpointNow()
+      commitEdit({ ...state.edit, masks: [...state.edit.masks, ...masks] })
+      checkpointNow()
+      set({ selectedMaskId: masks[masks.length - 1].id, selectedRefineId: null, colorPicking: false, showMaskOverlay: true, suppressMaskOverlay: false, maskMode: true, cropMode: false })
+    },
     addQuickMask: (preset) => {
+      if (get().edit.masks.length >= SEMANTIC_MAX_MASKS) return
       // Proxy-domain approximation until the linear RAW path lands (M2): the
       // range handles select near-clipped tones; feather reaches into the
       // almost-gone zone so recovery blends instead of posterizing.
@@ -557,18 +592,65 @@ export const useStore = create<LuxinusState>((set, get) => {
     photos: [],
     selectedPath: null,
     loadingLibrary: false,
+    libraryError: null,
+    editLoading: false,
+    saveStatus: 'idle',
+    saveError: null,
+    flushSaves: () => saves.flush(),
+    retrySave: () => saves.flush(),
+    reloadCurrentEdits: async () => {
+      const path = get().selectedPath
+      if (!path) return
+      await saves.discard(path)
+      if (get().selectedPath !== path) return
+      set({ proxy: { ...get().proxy, status: 'idle' } })
+      get().selectPhoto(path)
+    },
+    editGestureActive: false,
+    beginEditGesture: () => {
+      if (!gestureDepth) checkpointNow()
+      gestureDepth++
+      set({ editGestureActive: true })
+    },
+    endEditGesture: () => {
+      gestureDepth = Math.max(0, gestureDepth - 1)
+      if (!gestureDepth) { checkpointNow(); set({ editGestureActive: false }) }
+    },
+    previewEdit: null,
+    setPreviewEdit: (previewEdit) => set({ previewEdit }),
+    applyAgentEdit: (result) => {
+      const current = get()
+      if (current.selectedPath !== result.photoId || JSON.stringify(current.edit) !== JSON.stringify(result.baseEdit)) return false
+      checkpointNow()
+      const edit = coerceEditState(result.edit)
+      const editedPaths = new Set(get().editedPaths)
+      if (isEdited(edit)) editedPaths.add(result.photoId)
+      else editedPaths.delete(result.photoId)
+      set((state) => ({ edit, previewEdit: null, editedPaths, undoStack: [...state.undoStack, state.edit].slice(-100), redoStack: [], saveStatus: 'saved', saveError: null }))
+      histBaseline = edit
+      restoreSavedPreview()
+      return true
+    },
     filter: { ...DEFAULT_FILTER },
     setFilter: (patch) => set((s) => ({ filter: { ...s.filter, ...patch } })),
     editedPaths: new Set(),
 
     openFolder: async () => {
       if (!window.luxinus) return
-      set({ loadingLibrary: true })
+      if (get().loadingLibrary) return
+      if (!(await saves.flush())) return
+      const request = ++folderRequest
+      set({ loadingLibrary: true, libraryError: null })
       try {
         const res = await window.luxinus.library.openFolder()
-        if (res.canceled) return
+        if (res.canceled || request !== folderRequest) return
         for (const p of get().photos) if (p.thumbUrl) URL.revokeObjectURL(p.thumbUrl)
         const { proxy, denoiseProxy } = get()
+        // A new empty library never calls selectPhoto, so invalidate old work
+        // here before replacing the state that carries its cancellation flag.
+        photoRequest++
+        restorationRequest++
+        if (denoiseProxy.status === 'running') void window.luxinus.ai.cancel()
         if (proxy.url) URL.revokeObjectURL(proxy.url)
         if (denoiseProxy.url) URL.revokeObjectURL(denoiseProxy.url)
 
@@ -580,18 +662,25 @@ export const useStore = create<LuxinusState>((set, get) => {
           selection: new Set(),
           filter: { ...DEFAULT_FILTER },
           proxy: { ...IDLE_PROXY },
-          denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null },
+          denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null, cacheStatus: 'none', cacheMessage: null },
           edit: defaultEditState(),
-          editedPaths: new Set()
+          editedPaths: new Set(),
+          previewEdit: null,
+          editLoading: false, cropMode: false, maskMode: false, straightening: false,
+          wbPicking: false, colorPicking: false, selectedMaskId: null, selectedRefineId: null,
+          histogram: null, snapshots: []
         })
+        resetHistory(defaultEditState())
         if (photos[0]) get().selectPhoto(photos[0].filePath)
         // Mark which photos already have a sidecar (edited badge).
         window.luxinus.edits
           .editedList(photos.map((p) => p.filePath))
-          .then((edited) => set({ editedPaths: new Set(edited) }))
-          .catch(() => {})
+          .then((edited) => { if (request === folderRequest) set({ editedPaths: new Set(edited) }) })
+          .catch((err: Error) => set({ libraryError: err.message }))
+      } catch (err) {
+        set({ libraryError: (err as Error).message })
       } finally {
-        set({ loadingLibrary: false })
+        if (request === folderRequest) set({ loadingLibrary: false })
       }
     },
 
@@ -606,50 +695,70 @@ export const useStore = create<LuxinusState>((set, get) => {
 
     selectPhoto: (filePath) => {
       const cur = get()
-      if (cur.selectedPath === filePath && cur.proxy.status !== 'idle') return
+      if (cur.selectedPath === filePath && cur.proxy.status !== 'idle' && cur.proxy.status !== 'error') {
+        set({ selection: new Set([filePath]) })
+        return
+      }
       const photo = cur.photos.find((p) => p.filePath === filePath)
+      if (!photo) return
+      const request = ++photoRequest
+      restorationRequest++
+      if (cur.denoiseProxy.status === 'running') void window.luxinus?.ai.cancel()
+      const pendingEdit = saves.get(filePath)
+      void saves.flush()
       if (cur.proxy.url) URL.revokeObjectURL(cur.proxy.url)
       // The previous photo's denoise result is about to be dropped from state.
       if (cur.denoiseProxy.url) URL.revokeObjectURL(cur.denoiseProxy.url)
       set({
         selectedPath: filePath,
         selection: new Set([filePath]),
-        edit: defaultEditState(),
+        edit: pendingEdit ?? defaultEditState(),
+        previewEdit: null,
+        editLoading: !!window.luxinus,
+        histogram: null,
+        wbPicking: false,
+        showBefore: false,
         proxy: { filePath, url: null, status: 'loading', message: null },
         cropMode: false,
         maskMode: false,
         selectedMaskId: null,
         colorPicking: false,
         snapshots: snapshotStore.get(filePath) ?? [],
-        denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null }
+        denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null, cacheStatus: 'none', cacheMessage: null }
       })
       resetHistory(defaultEditState())
       if (!window.luxinus || !photo) return
 
-      // Load this photo's saved edits (sidecar) — ignore if user moves on.
-      window.luxinus.edits
-        .load(filePath)
-        .then((loaded) => {
-          if (get().selectedPath !== filePath || !loaded) return
-          const edit = coerceEditState(loaded)
-          set((s) => {
-            const next = new Set(s.editedPaths)
-            if (isEdited(edit)) next.add(filePath)
-            return { edit, editedPaths: next }
+      // Drain earlier writes before reading the sidecar; a late A→B→A result
+      // must never replace a newer photo request or user edit.
+      void (async () => {
+        try {
+          await saves.flush()
+          const loaded = saves.get(filePath) ?? await window.luxinus.edits.load(filePath)
+          if (request !== photoRequest) return
+          const edit = coerceEditState(loaded ?? defaultEditState())
+          set((state) => {
+            const editedPaths = new Set(state.editedPaths)
+            if (isEdited(edit)) editedPaths.add(filePath)
+            else editedPaths.delete(filePath)
+            return { edit, editedPaths, editLoading: false }
           })
-          // Loaded sidecar becomes the history baseline for this photo.
           resetHistory(edit)
-        })
-        .catch(() => {})
+          restoreSavedPreview()
+        } catch (err) {
+          if (request === photoRequest) set({ saveStatus: 'error', saveError: (err as Error).message, editLoading: true })
+        }
+      })()
 
       window.luxinus.library
         .requestProxy(filePath, photo.mtimeMs)
         .then((res) => {
-          if (get().selectedPath !== filePath) return
+          if (request !== photoRequest) return
           set({ proxy: { filePath, url: webpToUrl(res.webp), status: 'ready', message: null } })
+          restoreSavedPreview()
         })
         .catch((err: Error) => {
-          if (get().selectedPath !== filePath) return
+          if (request !== photoRequest) return
           set({
             proxy: { filePath, url: null, status: 'error', message: friendlyDecodeError(err.message) }
           })
@@ -660,14 +769,14 @@ export const useStore = create<LuxinusState>((set, get) => {
       set((s) => ({
         photos: s.photos.map((p) => (p.filePath === filePath ? { ...p, rating } : p))
       }))
-      window.luxinus?.library.setRating(filePath, rating).catch(() => {})
+      window.luxinus?.library.setRating(filePath, rating).then((ok) => { if (!ok) throw new Error('별점을 저장하지 못했습니다.') }).catch((err: Error) => set({ libraryError: err.message }))
     },
 
     setFlag: (filePath, flagged) => {
       set((s) => ({
         photos: s.photos.map((p) => (p.filePath === filePath ? { ...p, flagged } : p))
       }))
-      window.luxinus?.library.setFlag(filePath, flagged).catch(() => {})
+      window.luxinus?.library.setFlag(filePath, flagged).then((ok) => { if (!ok) throw new Error('플래그를 저장하지 못했습니다.') }).catch((err: Error) => set({ libraryError: err.message }))
     },
 
     selection: new Set(),
@@ -675,7 +784,7 @@ export const useStore = create<LuxinusState>((set, get) => {
       const s = get()
       if (mods.shift && s.selectedPath) {
         // Range-select from the active photo to the clicked one (filtered order).
-        const order = selectFilteredPhotos(s).map((p) => p.filePath)
+        const order = mods.order ?? selectFilteredPhotos(s).map((p) => p.filePath)
         const a = order.indexOf(s.selectedPath)
         const b = order.indexOf(filePath)
         if (a >= 0 && b >= 0) {
@@ -712,16 +821,21 @@ export const useStore = create<LuxinusState>((set, get) => {
       if (targets.length === 0) return 0
       set({ syncing: true })
       try {
+        if (!(await saves.flush())) return 0
         const written = new Set<string>()
+        const failures: string[] = []
         await Promise.all(
           targets.map(async (path) => {
             // Preserve each target's existing framing if it has a sidecar.
-            const existing = await window.luxinus.edits.load(path).catch(() => null)
+            try {
+            const existing = await window.luxinus.edits.load(path)
             const merged = existing
-              ? { ...look, crop: existing.crop, rotate: existing.rotate, flipH: existing.flipH, flipV: existing.flipV }
-              : look
+              ? { ...look, crop: existing.crop, rotate: existing.rotate, flipH: existing.flipH, flipV: existing.flipV, masks: existing.masks, denoise: existing.denoise }
+              : { ...look, masks: [], denoise: 0 }
             const ok = await window.luxinus.edits.save(path, merged).catch(() => false)
             if (ok) written.add(path)
+            else failures.push(path)
+            } catch { failures.push(path) }
           })
         )
         set((st) => {
@@ -729,6 +843,7 @@ export const useStore = create<LuxinusState>((set, get) => {
           for (const p of written) badge.add(p)
           return { editedPaths: badge }
         })
+        if (failures.length) set({ saveStatus: 'error', saveError: `${written.size}/${targets.length}장 저장 완료. 실패: ${failures.map((p) => p.split(/[\\/]/).pop()).join(', ')}` })
         return written.size
       } finally {
         set({ syncing: false })
@@ -768,7 +883,9 @@ export const useStore = create<LuxinusState>((set, get) => {
       if (!c || !get().selectedPath) return
       const e = get().edit
       // Paste the look; keep this photo's own framing (like Lightroom).
-      commitEdit({ ...c, crop: e.crop, rotate: e.rotate, flipH: e.flipH, flipV: e.flipV })
+      const masks = [...c.masks.filter(mask => mask.kind !== 'semantic'), ...e.masks.filter(mask => mask.kind === 'semantic')]
+      if (masks.length > SEMANTIC_MAX_MASKS) return
+      commitEdit({ ...c, crop: e.crop, rotate: e.rotate, flipH: e.flipH, flipV: e.flipV, masks })
     },
 
     undoStack: [],
@@ -781,6 +898,7 @@ export const useStore = create<LuxinusState>((set, get) => {
       set((st) => ({ undoStack: st.undoStack.slice(0, -1), redoStack: [...st.redoStack, st.edit] }))
       histBaseline = prev
       writeEdit(prev)
+      restoreSavedPreview()
     },
     redo: () => {
       const s = get()
@@ -789,6 +907,7 @@ export const useStore = create<LuxinusState>((set, get) => {
       set((st) => ({ redoStack: st.redoStack.slice(0, -1), undoStack: [...st.undoStack, st.edit] }))
       histBaseline = next
       writeEdit(next)
+      restoreSavedPreview()
     },
     jumpToHistory: (index) => {
       checkpointNow() // flush any in-flight drag so the timeline is complete
@@ -801,6 +920,7 @@ export const useStore = create<LuxinusState>((set, get) => {
       set({ undoStack, redoStack })
       histBaseline = target
       writeEdit(target)
+      restoreSavedPreview()
     },
 
     snapshots: [],
@@ -809,7 +929,7 @@ export const useStore = create<LuxinusState>((set, get) => {
       if (!path) return
       const snap: Snapshot = {
         id: crypto.randomUUID(),
-        name: name.trim() || `Snapshot ${(snapshotStore.get(path)?.length ?? 0) + 1}`,
+        name: name.trim() || `보정 버전 ${(snapshotStore.get(path)?.length ?? 0) + 1}`,
         edit: get().edit,
         createdAt: new Date().toISOString()
       }
@@ -839,20 +959,27 @@ export const useStore = create<LuxinusState>((set, get) => {
       set({ snapshots: list })
     },
 
-    denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null },
+    denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null, cacheStatus: 'none', cacheMessage: null },
     runDenoise: async () => {
       const st = get()
       if (!window.luxinus || st.proxy.status !== 'ready' || !st.proxy.url || !st.selectedPath) return
+      if (st.denoiseProxy.status === 'running') return
+      const request = photoRequest
+      const restoration = ++restorationRequest
       const path = st.selectedPath
       const proxyUrl = st.proxy.url
-      set({ denoiseProxy: { filePath: path, url: null, status: 'running', progress: 0, message: null } })
+      const source = st.photos.find(photo => photo.filePath === path)
+      if (!source) return
+      if (st.denoiseProxy.url) URL.revokeObjectURL(st.denoiseProxy.url)
+      set({ denoiseProxy: { filePath: path, url: null, status: 'running', progress: 0, message: null, cacheStatus: 'pending', cacheMessage: null } })
       const off = window.luxinus.ai.onProgress(({ progress }) => {
-        if (get().denoiseProxy.filePath === path && get().denoiseProxy.status === 'running') {
+        if (restoration === restorationRequest && get().denoiseProxy.filePath === path && get().denoiseProxy.status === 'running') {
           set((s) => ({ denoiseProxy: { ...s.denoiseProxy, progress } }))
         }
       })
       try {
         const img = await loadImageEl(proxyUrl)
+        if (request !== photoRequest || restoration !== restorationRequest) return
         // Denoise a downscaled preview so it stays responsive (inference cost
         // scales with pixels); the develop shader upsamples it. Full-res denoise
         // is an export-time concern.
@@ -864,10 +991,11 @@ export const useStore = create<LuxinusState>((set, get) => {
         const ctx = c.getContext('2d')!
         ctx.drawImage(img, 0, 0, c.width, c.height)
         const rgba = new Uint8Array(ctx.getImageData(0, 0, c.width, c.height).data.buffer)
-        const res = await window.luxinus.ai.denoise({ rgba, width: c.width, height: c.height, strength: 100 })
-        if (get().selectedPath !== path) return
+        const res = await window.luxinus.ai.restorePreview({ filePath: path, sourceMtimeMs: source.mtimeMs, sourceSize: source.size,
+          requestId: crypto.randomUUID(), rgba, width: c.width, height: c.height })
+        if (request !== photoRequest || restoration !== restorationRequest) return
         if (!res.ok || !res.rgba || !res.width || !res.height) {
-          set((s) => ({ denoiseProxy: { ...s.denoiseProxy, status: 'error', message: res.message ?? 'Denoise unavailable.' } }))
+          set((s) => ({ denoiseProxy: { ...s.denoiseProxy, status: 'error', message: res.message ?? '복원 결과를 만들지 못했습니다.', cacheStatus: 'none' } }))
           return
         }
         ctx.putImageData(new ImageData(new Uint8ClampedArray(res.rgba), res.width, res.height), 0, 0)
@@ -879,25 +1007,30 @@ export const useStore = create<LuxinusState>((set, get) => {
             'image/png'
           )
         })
-        if (get().selectedPath !== path) {
+        if (request !== photoRequest || restoration !== restorationRequest) {
           URL.revokeObjectURL(url)
           return
         }
         const prevUrl = get().denoiseProxy.url
         if (prevUrl) URL.revokeObjectURL(prevUrl)
-        set({ denoiseProxy: { filePath: path, url, status: 'ready', progress: 1, message: null } })
-        // Give the slider a sensible starting strength if it's still at zero.
-        if (get().edit.denoise === 0) get().setEdit({ denoise: 60 })
-      } catch {
-        set((s) => ({ denoiseProxy: { ...s.denoiseProxy, status: 'error', message: 'Denoise failed.' } }))
+        set({ denoiseProxy: { filePath: path, url, status: 'ready', progress: 1, message: null,
+          cacheStatus: res.cache?.status ?? 'error', cacheMessage: res.cache?.message ?? (res.cache ? null : '복원 결과의 디스크 저장을 확인하지 못했습니다.') } })
+        // Seed a manual run only while its starting edit is still current.
+        // A late result must not undo the user's Undo or a newer zero strength.
+        if (st.edit.denoise === 0 && get().edit === st.edit) get().setEdit({ denoise: 60 })
+      } catch (err) {
+        if (request === photoRequest && restoration === restorationRequest) set((s) => ({ denoiseProxy: { ...s.denoiseProxy, status: 'error', message: (err as Error).message, cacheStatus: 'none' } }))
       } finally {
         off()
       }
     },
     clearDenoise: () => {
+      restorationRequest++
+      const wasRunning = get().denoiseProxy.status === 'running'
+      if (wasRunning) void window.luxinus?.ai.cancel()
       const url = get().denoiseProxy.url
       if (url) URL.revokeObjectURL(url)
-      set({ denoiseProxy: { filePath: null, url: null, status: 'idle', progress: 0, message: null } })
+      set({ denoiseProxy: { filePath: get().selectedPath, url: null, status: wasRunning ? 'error' : 'idle', progress: 0, message: wasRunning ? '복원을 취소했습니다.' : null, cacheStatus: 'none', cacheMessage: null } })
     },
 
     histogram: null,

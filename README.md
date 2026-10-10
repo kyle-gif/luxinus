@@ -1,187 +1,90 @@
 # Luxinus
 
-A **fully local**, on-device AI photo editor — a Lightroom alternative. RAW editing plus AI features (denoise, upscale, masking, object removal) all run on your machine. **Photo data never leaves the device.**
+Mac 안에서 사진을 고르고 보정하고 내보내는 개인용 사진 작업실입니다. Electron·React·TypeScript·Zustand·WebGL 기반의 기존 RAW 엔진과 `<사진>.lux.json` 비파괴 보정 포맷을 사용합니다.
 
-> Status: **Phase 4 — presets complete.** Save the current look as a named **preset** (JSON), apply/delete it, each shown as a **live thumbnail of the current photo** rendered through the shared edit shader. **Import Lightroom `.xmp`** presets — the `crs:` namespace is mapped onto Luxinus parameters (tone, colour, tone curve, 8-channel HSL, detail, vignette) with an import summary listing what mapped and what isn't supported, and an *"approximate mapping"* notice. Builds on Phase 3 (export), Phase 2 (editing), Phase 1 (library + RAW), Phase 0 (local-only shell).
+## 실행
 
-## Tech stack
+이미 의존성이 설치된 현재 체크아웃:
 
-| Concern | Choice |
-| --- | --- |
-| Shell | Electron + electron-builder (Windows NSIS / macOS dmg) |
-| Frontend | React 18 · TypeScript · Vite · Zustand · Tailwind CSS |
-| AI inference *(Phase 5+)* | onnxruntime-node — DirectML/CUDA (Win), CoreML (mac), CPU fallback |
-| RAW decode | **libraw-wasm** (LibRaw compiled to WASM) in a hidden Chromium decode window |
-| Image processing | **sharp** (libvips) — resize, webp, JPEG/PNG/TIFF/HEIF |
-| Thumbnail cache | **better-sqlite3** + webp |
-| Preset parsing *(Phase 4)* | fast-xml-parser (Lightroom `.xmp`) |
-| EXIF *(Phase 3)* | exiftool-vendored |
-
-Dependencies are added only in the phase that first needs them, so the tree always builds cleanly. Phase 1 added `sharp`, `libraw-wasm`, and `better-sqlite3` (see justifications at the bottom).
-
-### Native modules & Electron ABI
-
-`better-sqlite3` is a native addon and must be built against Electron's ABI, not the host Node's. This is wired via electron-builder:
-
-```bash
-npx electron-builder install-app-deps   # rebuilds native deps for the installed Electron
+```sh
+npm run dev
 ```
 
-`sharp` (N-API, ABI-stable) needs no rebuild.
+프로덕션 번들을 확인하려면 `npm run build` 후 `npm start`를 실행합니다. `build`는 타입 검사를 포함하지 않습니다.
 
-### Why RAW decodes in a hidden window, not the utility process
-
-`libraw-wasm` is a **browser** build: it spins up a Web Worker and loads its `.wasm` via `fetch`/`XMLHttpRequest`, neither of which works in Electron's Node utility process (verified failing across 11 manufacturer RAWs). So RAW decode runs in a dedicated **offscreen Chromium "decode window"** — libraw-wasm's native environment — orchestrated by main:
-
-```
-UI window (connect-src 'none')         ← never sees RAW bytes
-  requestProxy ─▶ main ─▶ decode worker (scan · sharp · SQLite cache)
-                              │ host:decodeRaw
-                              ▼
-                       main ─▶ hidden decode window (libraw-wasm)  → RGB / embedded JPEG
-                              ▼
-                       decode worker: sharp resize → webp → cache → UI
+```sh
+npm run typecheck  # Node + renderer 전체 TypeScript 검사
+npm test          # 저장·경로·XMP·모델 schema·취소 회귀 테스트
+npm run build     # main / preload / renderer 프로덕션 번들
+npm run test:onnx # 검증된 NAFNet SIDD 모델로 실제 CPU 추론
+npm run test:electron # 합성 사진/임시 userData를 사용하는 실제 Electron UI·IPC 검사
+npm run test:electron:restoration # 실제 ONNX utility·GPU export·취소·네트워크 정책
+npm run test:electron:codex # 무통신 상태 조회 + 모의 계정으로 실제 Electron UI 검사
+npm run test:electron:chat # 실제 채팅/첨부/저장/비교; Codex 서비스만 모의 프로토콜
+npm run test:electron:viewport # 실제 Electron 휠/드래그/단축키 + 편집 보존
 ```
 
-The decode window is served over a privileged `lux://` protocol (so its wasm `fetch` works under `file://` in production) on its **own session** with `connect-src 'self'` — still strictly local (same-origin only, nothing leaves the device); the UI window keeps `connect-src 'none'`. Graceful fallback: if a camera is too new for this LibRaw build to demosaic, the embedded JPEG preview is used so the photo still displays.
+새 환경에서 `npm ci`는 패키지를 다운로드하고 Electron용 native module을 빌드합니다. 설치·대규모 다운로드는 사용자 동의 후 실행하세요. 실제 GUI 실행이 허용되지 않는 환경에서는 마지막 검사가 통과한 것으로 간주할 수 없습니다.
 
-## Local-only guarantees (enforced now)
+## 사진 작업
 
-- **Strict CSP**: the renderer runs under `default-src 'self'` and `connect-src 'none'`. The shipped `index.html` hard-codes this (reliable for the packaged `file://` renderer); the main process also sets it as a header. In **dev only**, an `apply: 'serve'` Vite plugin relaxes `connect-src` for HMR — production stays literally `connect-src 'none'`.
-- **Sandboxed renderer**: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`. The renderer's only capability is the narrow typed `window.luxinus` bridge in the preload.
-- **Navigation lockdown**: the main process blocks any navigation/popup to a remote origin; external links open in the OS browser.
-- **No publish provider** configured (`publish: null`). The only network-capable path is an optional, user-initiated update check that sends no user data (stubbed in Phase 0).
+- **사진 목록:** 폴더 탐색, 점진적 썸네일, 파일명·확장자·별점·플래그 필터, 정렬, 다중 선택, 가상화 그리드, 썸네일 크기, 사진 정보.
+- **사진 편집:** 밝기·색상·곡선·색상별 조정·영역별 색감·자르기·수평·부분 보정·전후 비교·확대·프리셋·기록. 슬라이더 직접 입력과 드래그 단위 Undo.
+- **사진만 보기:** 사진 편집에서 `F`, 종료 `F` 또는 `Esc`. 활성 자르기·마스크 등 도구를 정리하고 들어갑니다. `Tab`은 정상 포커스 이동에 사용합니다.
+- **내보내기:** JPEG/PNG/TIFF, 실제 픽셀 크기, sRGB 8비트, EXIF 유지/제거/테두리. 기존 출력 파일은 고유한 이름으로 보존합니다. 취소와 파일별 실패를 표시합니다.
+- **저장:** 실패를 숨기지 않으며 재시도·현재 사진의 디스크 보정 다시 읽기를 제공합니다. 외부 sidecar 변경은 충돌로 처리합니다.
+- **인물 자동 선택:** **부분 보정 → 인물 부위 찾기**에서 인물 전체·얼굴·눈·코·입·피부·옷·머리카락을 고릅니다. 로컬 CNN 분석 결과를 보정 파일에 함께 저장하며, 재실행과 자르기·회전·뒤집기 이후에도 같은 부위를 보정합니다. [모델과 사용 범위](docs/portrait-masking.md).
 
-Verify the guarantee at any time:
+사진 목록/사진 편집 간 이동은 폴더·필터·선택·스크롤을 유지합니다. 기본 테마는 `#151515` / 패널 `#1C1C1C` / 팝오버 `#262626`, 선택 강조 `#B7A8F7`입니다. 사진 배경 회색 선택은 표시 설정이며 보정이나 내보내기 데이터에 포함되지 않습니다. 글꼴은 macOS 한글 시스템 글꼴과 기존 번들 글꼴을 사용합니다.
 
-```bash
-# Should print connect-src 'none' in the built renderer, and NO occurrence in dist that weakens it.
-grep -R "connect-src 'none'" src/renderer/index.html
-```
+## AI 채팅과 로그인
 
-## Project structure
+왼쪽 **AI 작업 도우미**에서 로컬 모델 / GPT Codex를 선택합니다. `⌘/Ctrl+K`로 패널을 열고, `⌘/Ctrl+Enter`로 요청합니다. 1200px보다 좁은 창에서는 상단 **AI 채팅 / 보정 도구**로 양쪽 패널을 전환해 사진 공간을 확보합니다.
 
-```
-src/
-  main/       index.ts (windows + CSP + nav lockdown), ipc.ts (app/update),
-              library.ts (forks the decode worker; bridges renderer ⇄ worker ⇄ window),
-              decode-window.ts (lux:// protocol + hidden Chromium RAW decode window)
-  preload/    index.ts (UI bridge), decoder.ts (decode-window bridge)
-  workers/    decode.worker.ts (scan · sharp resize/encode · proxy · thumbs · cache),
-              onnx.worker.ts (utilityProcess stub, Phase 5)
-  shared/     ipc-channels.ts, library.ts  (typed contracts shared by all layers)
-  renderer/   index.html + src/ (React UI); decoder.html + src/decoder (libraw-wasm)
-```
+- **GPT Codex:** **AI 설정 → GPT Codex → ChatGPT로 로그인**. 공식 Codex CLI와 Luxinus 전용 로그인 저장소를 사용하며 API 키가 필요하지 않습니다. **목록 불러오기**를 눌러 계정 모델을 가져오고, 고급 설정에서 그 모델이 제공하는 추론 강도를 고릅니다.
+- **이미지 입력:** **현재 사진 포함**이 기본으로 켜져 있으며 현재 보정·자르기·복원을 반영한 사진을 보냅니다. 이 설정을 켜고 요청하면 에이전트가 작업 중 사진 미리보기도 최대 4회 확인할 수 있습니다. 끄면 현재 사진의 추가 캡처와 인물 분석 도구도 제공하지 않습니다. **참고 이미지 +**로 원하는 느낌의 이미지를 더할 수 있습니다. 최초 첨부는 최대 4장, 긴 변 1536px의 메타데이터를 제거한 JPEG입니다. **보내기**를 누르기 전에는 전송하지 않습니다. 모델이 이미지 입력을 지원해야 합니다.
+- **앱 도구:** 밝기·색상·곡선·HSL·색감·자르기·부분 보정, 별점·표시, 사진 선택, 필터·정렬, 보기 설정, 실행 취소/다시 실행, 패널 열기를 제안합니다. 사진 목록 공유는 기본으로 꺼져 있습니다. 내보내기는 설정 창을 열고 사용자가 저장합니다.
+- **제안과 비교:** 대화의 변경 목록에서 **적용 전 / 적용 후 / 나란히 비교**를 선택합니다. **제안 적용**으로 저장한 뒤에도 그 제안 시점의 전후 기록을 볼 수 있습니다. 고급 보정 여러 개도 한 번의 Undo로 복원됩니다. 비교 자체는 저장하지 않습니다.
+- **사진을 보며 반복 편집:** “피부만 조금 밝게 하고 결과를 확인해줘”처럼 요청하면 실제 인물 분석 → 마스크 생성·수정 → 자르기 → 사진 스크린샷 확인을 같은 대화에서 이어갑니다. **사진 작업 기록**에서 단계와 확인한 미리보기를 봅니다. 스크린샷은 해당 사진만 렌더링하며 바탕화면이나 다른 앱을 캡처하지 않습니다. 모든 보정은 마지막 **제안 적용** 전까지 저장하지 않습니다.
+- **대화만:** 고급 설정에서 선택하면 읽기 도구만 제공합니다. 보정·앱 변경을 제안하지 않습니다.
+- **로컬 모델:** 기존 Qwen2.5-1.5B Q4_K_M과 llama.cpp를 유지합니다. **AI 설정 → 로컬 모델 → 모델 실행 확인** 후 기본 보정값을 요청합니다. 이미지 분석·앱 조작은 지원하지 않습니다. 설치와 검사 방법은 [로컬 모델 문서](docs/local-agent.md)에 있습니다.
 
-Heavy work (RAW decode, ONNX inference, export) runs in **utility processes**, never on the main or renderer thread.
+대화·비교 기록은 현재 앱 세션에 최근 40개 메시지를 유지합니다. 사진과 제공자별로 구분하며 후속 요청에는 해당 대화의 최근 12개 문장과 적용 상태를 보냅니다. 이전 첨부는 자동 재전송하지 않습니다. 자동 사진 업로드·모델 목록 갱신·다운로드·텔레메트리는 없습니다. 일반 사진 작업과 로컬 모델은 네트워크를 사용하지 않습니다. 상세 동작과 검증 범위는 [AI 채팅과 조작 문서](docs/ai-workspace.md)에 있습니다.
 
-## Scripts
+로컬 모델의 수치는 “대비를 17로 설정해줘”처럼 **변경 후 앱 값**을 사용합니다. EV 환산·상대 계산을 지원하지 않으며 요청과 출력의 항목·값이 다르면 적용을 거부합니다. Codex에는 현재값과 앱 단위를 제공하며 모든 보정과 앱 동작은 도구별 범위 검증을 거칩니다.
 
-```bash
-npm install        # install Phase 0 deps
-npm run dev        # launch the app with HMR
-npm run build      # type-check + build main/preload/renderer to out/
-npm run typecheck  # tsc for both node and web projects
-npm run dist:mac   # package a macOS .dmg
-npm run dist:win   # package a Windows NSIS installer
-```
+## 트랙패드와 마우스
 
-## Design system — "Liquid Glass × Black / Hot Pink"
+| 동작 | macOS / Windows |
+|---|---|
+| 사진 이동 | 두 손가락 스크롤, 일반 휠 (가로는 Shift+휠) |
+| 커서 위치를 중심으로 확대/축소 | 핀치, ⌘/Ctrl+휠 |
+| 손 도구로 이동 | Space+왼쪽 드래그, 가운데 버튼 드래그 |
+| 화면에 맞춤 | Shift+1 또는 맞춤 버튼 |
+| 원본 잠깐 보기 | B 누르기 (놓으면 현재 보정) |
 
-- Floating glass **panels overlay a full-bleed photo stage**, so the frosted `blur(32px)` genuinely refracts the image beneath. Matte, not glossy — no Aero specular streak.
-- **Pink is a hairline, not a fill** (`#FF2D78` → `#FF6AA5`): borders, ticks, focus rings, active-state outlines, and the single filled slider segment. No button is ever a solid pink block.
-- Aperture logo mark, editorial uppercase eyebrow labels, JetBrains Mono numerics. Panels 16px radius, buttons 10px. Focus rings 1.5px pink. `prefers-reduced-motion` respected.
-- macOS: frameless with the traffic lights inset onto the top bar (a window drag region); Windows keeps the native frame until Phase 8.
+자르기·브러시 도구를 켠 상태에서도 Space/가운데 버튼 이동은 편집을 바꾸지 않습니다. 확대는 화면 맞춤 기준 0.1~12배이며 원본 픽셀 100%와 다릅니다.
 
-## Manual test scenarios — Phase 4
+## 실행 취소와 자르기
 
-Edit a photo, then in the **Presets** section (Develop panel / Simple mode):
+오른쪽 보정 도구의 **실행 취소 / 다시 실행** 버튼을 사용하거나 `⌘/Ctrl+Z`, `⌘/Ctrl+Shift+Z`를 누릅니다. Windows식 `Ctrl+Y`도 지원합니다. 텍스트 입력 중에는 입력 내용의 기본 실행 취소를 유지합니다. 모달 뒤의 사진이나 아직 로딩 중인 사진은 단축키로 변경하지 않습니다.
 
-1. **Save a look**: adjust some sliders → **+ Save current** → name it. It appears as a tile showing the current photo with the preset applied.
-2. **Live thumbnails**: each preset tile renders the *current* photo through that preset (via the shared shader), so different presets look visibly different — and update when you switch photos.
-3. **Apply**: click a tile → its adjustments merge onto the current edit (your crop/rotate/flip are preserved). Autosaves to the sidecar like any edit.
-4. **Delete**: hover a tile → ✕.
-5. **Persistence**: presets are JSON in the app's userData; they survive restarts.
-6. **Import Lightroom `.xmp`**: **Import .xmp** → pick a preset file. A summary shows the **mapped** fields and any **not supported** (`Dehaze`, `Texture`, split toning, lens corrections, …) plus an *"approximate mapping — results may differ slightly from Adobe's rendering"* notice. Choose **Apply now** or keep it as a preset.
-7. **Local-only**: `.xmp` is read locally; nothing leaves the device; `connect-src 'none'` intact.
+**자르기·수평**에서 비율, 수평 각도, 좌우·상하 뒤집기를 함께 조절합니다. 수평 맞추기는 기존 ±45° 기능이며 90° 방향 전환 기능을 추가한 것은 아닙니다. **완료**로 편집 패널로 돌아갑니다.
 
-## Manual test scenarios — Phase 3
+## XMP와 노이즈 제거
 
-Edit a photo, then click **Export** (top bar):
+**AI 설정 → 사진 프리셋 XMP 검토**에서 선택한 파일의 지원 보정값을 수정합니다. 원문 비교, 적용, 충돌 검사, 직전 변경 되돌리기를 제공합니다. XMP의 보정 의미와 Luxinus 가져오기 매핑은 동일하지 않을 수 있습니다.
 
-1. **Formats**: choose JPEG (with Quality), PNG, or TIFF. Set Resize to Original / 2048 / 4096. The output is rendered at full resolution through the **same shader** as the preview, so exported pixels match what you see.
-2. **Filename pattern**: e.g. `{name}_{seq}` → `IMG_2040_001.jpg`. Tokens: `{name} {seq} {date} {W} {H}`. Existing files are never overwritten (auto `-1`, `-2`).
-3. **Metadata → Keep**: exported file retains the original's EXIF/GPS/XMP (verify with `exiftool out.jpg`).
-4. **Metadata → Strip**: exported file has no EXIF/GPS/XMP.
-5. **Metadata → Frame**: EXIF is stripped from the file *and* the shooting info (camera · focal · aperture · shutter · ISO · date) is burned onto a typographic border — pick **Minimal White** or **Black Film**; the dialog shows a live preview.
-6. **Batch**: with a filter active and >1 photo, choose **All N** to export the whole set; each non-selected photo uses its own sidecar edits.
-7. **Local-only**: files are written only to the folder you pick; `connect-src 'none'` intact; nothing leaves the device.
+**노이즈 제거 (NAFNet SIDD)**는 실제 사진 노이즈로 학습한 모델을 로컬에서 실행합니다. 기존 GoPro 흐림 모델은 파일을 보존하며 노이즈 제거에 사용하지 않습니다. 새 파일은 `models/nafnet-sidd-width32.onnx`에 설치했습니다.
 
-## Manual test scenarios — Phase 2
+복원 결과는 계산이 끝나면 앱 전용 디스크 캐시에 자동 저장합니다. 사진을 다시 열 때 원본·입력·모델이 같으면 저장된 픽셀을 재사용합니다. **결과 이미지 저장…**은 현재 보정을 포함한 JPEG·PNG를 별도 파일로 내보냅니다. 미리보기는 최대 1600px, 내보내기는 원본 해상도에서 같은 모델을 실행합니다. 센서 RAW 복원이 아닌 RGB 노이즈 제거입니다. [모델·품질 검증](docs/restoration-denoise.md)을 참조하세요.
 
-Run `npm run dev`, open a folder, select a photo, then:
+## 보안·검증 범위
 
-1. **Real-time develop**: in Expert mode, drag any Light/Color slider — the canvas updates instantly (WebGL). Exposure brightens, contrast adds punch, temperature warms/cools, saturation/vibrance shift colour.
-2. **Tone curve**: expand *Tone Curve*, drag a point (or click the line to add one) — an S-curve adds contrast live. Switch R/G/B channels for split-toning. `reset` restores the identity line.
-3. **Color Mixer (HSL)**: expand *Color Mixer*, pick a colour band, adjust Hue/Saturation/Luminance — only that hue range changes (e.g. deepen just the blues).
-4. **Detail / Effects / Geometry**: Clarity + Sharpening add local contrast; Vignette darkens/brightens corners; Straighten rotates, Flip H/V mirror.
-5. **Before/after**: hold `Space` for full original; click **⊟ Compare** (or `\`) for a **draggable split** — drag the divider to wipe between original (left) and edited (right).
-6. **Auto Enhance** (Simple mode): one click sets tone from the image histogram (black/white points, median) + denoise from ISO.
-7. **Non-destructive persistence**: edits autosave to `<photo>.lux.json` next to the original. Reselect the photo (or restart the app) — edits reload. The **◆ badge** marks edited thumbnails. The original file is never modified.
-8. **Local-only**: `connect-src 'none'` intact; all editing is in-process WebGL, nothing leaves the device.
+Renderer는 `contextIsolation`, sandbox, 좁은 preload API와 CSP를 유지합니다. 파일 작업은 native picker로 승인한 사진/출력 경로와 정확한 앱 창에서만 요청할 수 있습니다. 원본 사진 쓰기·삭제, 일반 shell 실행, 개발 소스 자동 수정은 제공하지 않습니다.
 
-## Manual test scenarios — Phase 1
+네트워크 API의 전역 가로채기, Electron 세션의 모든 외부 요청 차단, 모델 프로세스의 네트워크 금지 규칙을 제거했습니다. 대신 일반 사진·로컬 추론 경로가 네트워크를 사용하지 않도록 구성했습니다. 로컬 모델의 원본 파일 쓰기·불필요한 파일 읽기·다른 실행 파일 호출 제한은 유지합니다. Codex는 shell·웹·파일 이미지 읽기·연결 앱 기능을 끄고 읽기 전용 정책을 사용합니다. 명시적 첨부 이미지 입력과 Luxinus 전용 도구만 연결하며, 예상하지 못한 도구 요청은 중단합니다.
 
-Run `npm run dev`, then:
+현재 RAW 파이프라인은 **8비트 sRGB proxy**입니다. 16비트 선형 RAW 편집, 모든 카메라 RAW/HEIF 지원, HDR/P3 출력은 검증하지 않았습니다. 실제 지원은 설치된 decoder와 샘플에 따라 달라집니다.
 
-1. **Open Folder** (left drawer) → native picker. Pick a folder of photos (RAW and/or JPEG/PNG/TIFF/HEIF, including subfolders). The scan is recursive; thumbnails stream into the grid + filmstrip as they decode.
-2. **Select a photo** → its 2560px proxy renders on the canvas (a "decoding…" spinner shows briefly first). The bottom toolbar shows filename, dimensions, camera/ISO (RAW).
-3. **RAW files** show a `RAW` badge and decode via LibRaw (embedded preview for thumbnails, demosaiced proxy for the canvas).
-4. **Ratings**: on the selected photo, click the stars (or press `1`–`5`, `0` to clear). **Flag**: click ⚑ or press `P`. Both persist.
-5. **Filter** (left drawer): type to filter by filename, pick an extension, set a minimum star rating, or toggle flagged-only. The grid and filmstrip update; the count shows "N of total".
-6. **Navigation**: `←`/`→` move through the filtered set. `Space` shows the before/after badge (real comparison arrives in Phase 2).
-7. **Cache persistence**: reopen the same folder — thumbnails appear instantly from the SQLite+webp cache (stored under the app's userData dir). Editing a file's contents (new mtime) re-decodes it.
-8. **Local-only check**: DevTools → Network shows no outbound requests; `connect-src 'none'` is in `index.html`. Pixels, paths, and EXIF never leave the device.
-
-> **RAW note:** RAW decode (LibRaw demosaic in the hidden decode window) is verified end-to-end across all 11 tested manufacturers/formats. Very new cameras beyond this LibRaw build (e.g. Sony A9 III uncompressed) fall back to the embedded JPEG preview so the photo still displays. JPEG/PNG/TIFF/webp decode + proxy + cache are also verified end-to-end.
-
-## Manual test scenarios — Phase 0
-
-Run `npm run dev`, then verify:
-
-1. **App launches** to the welcome state: near-black stage, "Welcome to Luxinus", left drawer + right edit panel as floating glass.
-2. **Open Folder** (left drawer) opens the native OS folder picker. Picking a folder populates the thumbnail grid, filmstrip, and selects the first photo. *(Phase 0 seeds placeholder items; Phase 1 does the real scan.)*
-3. **Mode toggle** (top bar) switches the right panel between Simple (Auto Enhance + 4 large sliders) and Expert (Light/Color/Detail sections).
-4. **Sliders** drag smoothly; only the filled segment shows the pink gradient; the numeric value updates in mono; Reset returns them to 0.
-5. **Before/after**: hold `Space` → a "Before" badge appears; release → it clears.
-6. **Drawer collapse**: the `‹` button collapses the left drawer to a rail; clicking the rail expands it.
-7. **Local-only check**: open DevTools console — no outbound network requests; CSP violations (if any external request were attempted) would be reported. `connect-src 'none'` is present in `index.html`.
-
-## Dependency justifications
-
-Per project rule, every dependency is justified:
-
-- **sharp** — libvips-backed decode/resize/encode for JPEG/PNG/TIFF/HEIF and all proxy/thumbnail generation (webp). N-API, ABI-stable.
-- **libraw-wasm** — LibRaw compiled to WASM; RAW decode (demosaiced RGB, embedded preview, and pre-demosaic Bayer access for the Phase 5 RAW-denoise hook) in the hidden Chromium decode window, no native compilation. Verified across Canon CR2/CR3, Nikon NEF, Sony ARW (compressed/uncompressed/lossless), Fuji RAF, Olympus ORF, Panasonic RW2, Pentax PEF, and Adobe DNG.
-- **better-sqlite3** — synchronous, fast SQLite for the thumbnail/metadata cache (rating/flag persistence). Rebuilt for Electron's ABI via electron-builder.
-- **@types/better-sqlite3** *(dev)* — types for the above.
-- **exiftool-vendored** *(Phase 3)* — reads/writes EXIF/GPS/XMP for the export metadata policy (Keep copies tags from the original; Strip/Frame remove all). Ships a vendored ExifTool+Perl, unpacked from the asar at build.
-- **fast-xml-parser** *(Phase 4)* — parses Lightroom `.xmp` presets to map the `crs:` namespace onto Luxinus parameters. Pure-JS, no native deps.
-
-## Roadmap
-
-Phase 0 ✓ scaffold · **1 ✓ library + RAW proxy** · **2 ✓ basic editing + sidecars** · **3 ✓ export (Keep/Strip/Frame)** · **4 ✓ presets (JSON + `.xmp`)** · 5 geometry + local masks (crop/scale UI, straighten/aspect, brush & radial/linear masks) · 6 ONNX infra + AI denoise · 7 upscale (HAT → SUPIR) · 8 AI masking/remove (SAM2 + LaMa) · 9 onboarding + polish + packaging.
-
-See [`ROADMAP.md`](./ROADMAP.md) for the phase plan in detail. **Phase 5 is now the non-AI geometry & local-adjustment layer** (interactive crop, photo scaling/straighten, and manually-drawn masks); the AI inference stack (ONNX runtime + denoise) moved to **Phase 6**.
-
-### Editing architecture (Phase 2)
-
-Edits render through a **WebGL fragment shader** (`EditCanvas`) applied to the decoded proxy texture — the full stack (white balance → exposure → tone regions → contrast → tone-curve LUT → HSL mixer → vibrance/saturation → clarity/sharpen → vignette) runs in one pass at frame rate. The **same math** drives export at full resolution (Phase 3). The tone curve is a CPU-built 256×1 LUT (monotone cubic); the develop state is a versioned object persisted to a sidecar `<file>.lux.json` via an atomic temp-write+rename, so a crash never corrupts it and originals are never opened for writing.
-
-### Export architecture (Phase 3)
-
-Export re-runs the **same shader module** (`lib/editShader.ts`) at full resolution inside the hidden Chromium window — RAW is decoded full-size by LibRaw there, standard formats via the browser's own decoders (TIFF/HEIF pre-converted by sharp). Frame mode composites the border + typographic caption on a 2D canvas using the **bundled fonts** (Bricolage for the camera line, Geist Mono for the technical line), so the burned-in text renders identically offline. The final RGBA returns to main, where **sharp** encodes JPEG/PNG/TIFF and **exiftool-vendored** applies the metadata policy (Keep copies tags from the original; Strip/Frame remove all). Because pixels are freshly encoded and metadata is copied explicitly, nothing from the original file leaks unless you choose Keep.
-
-### Presets (Phase 4)
-
-Native presets store the tonal/colour/curve/HSL/detail/effects state (never geometry, which is photo-specific) as JSON in `userData/presets/`; applying a preset merges it onto the current edit while preserving the photo's crop/rotate/flip. Preset thumbnails are rendered through a **single shared offscreen WebGL context** (`lib/presetThumb.ts`, reusing the edit shader) — the current photo is uploaded once and each preset draws to a cached data-URL, so a panel of N presets never spawns N GL contexts. Lightroom `.xmp` import maps the `crs:` namespace approximately (e.g. `Exposure2012` EV → exposure, `ToneCurvePV2012` 0-255 points → 0-1, `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` → the 8 HSL bands) and reports every field it couldn't map.
+[이번 변경·검증 기록](docs/local-development-2026-09-09.md) · [남은 작업](ROADMAP.md)

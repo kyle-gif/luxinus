@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, protocol, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { runRestoration, shutdownAi } from './onnx'
 import { randomUUID } from 'node:crypto'
 import type { RawDecodeMode, RawDecodeResult } from '../shared/library'
 import type { ExportRenderRequest, ExportRenderResult } from '../shared/export'
@@ -8,13 +9,12 @@ import type { ExportRenderRequest, ExportRenderResult } from '../shared/export'
 // Hosts the hidden Chromium "decode window" that runs libraw-wasm in its native
 // environment (Web Worker + wasm fetch), which the Node utility process cannot.
 // The window is served over a privileged custom protocol so its wasm loads via
-// fetch under file:// in production. Everything stays local — 'self' origin only.
+// fetch under file:// in production. Decoding loads bundled resources only.
 
 const isDev = !app.isPackaged
 const SCHEME = 'lux'
-// Dedicated session so the UI window's strict CSP header (connect-src 'none' on
-// the default session) never touches the decode window — it governs itself via
-// decoder.html's own CSP (connect-src 'self', for its same-origin wasm fetch).
+// The dedicated session uses decoder.html's CSP, including WebAssembly support,
+// independently of the UI document's script policy.
 const PARTITION = 'persist:lux-decode'
 
 // Registered BEFORE app ready.
@@ -51,7 +51,7 @@ export function registerDecodeProtocol(): void {
     const url = new URL(request.url)
     const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'decoder.html'
     const filePath = path.normalize(path.join(rendererDir, rel))
-    if (!filePath.startsWith(rendererDir)) {
+    if (url.hostname !== 'app' || !filePath.startsWith(rendererDir + path.sep)) {
       return new Response('forbidden', { status: 403 })
     }
     try {
@@ -82,7 +82,12 @@ let listenersBound = false
 function bindListeners(): void {
   if (listenersBound) return
   listenersBound = true
-  ipcMain.on('decoder:reply', (_e, payload: { id: string } & RawDecodeResult) => {
+  ipcMain.handle('decoder:restore', (event, payload) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame || !exportPending.has(payload.id)) throw new Error('승인된 내보내기 작업이 아닙니다.')
+    return runRestoration(payload)
+  })
+  ipcMain.on('decoder:reply', (event, payload: { id: string } & RawDecodeResult) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) return
     const p = pending.get(payload.id)
     if (p) {
       pending.delete(payload.id)
@@ -90,14 +95,16 @@ function bindListeners(): void {
       p.resolve(result)
     }
   })
-  ipcMain.on('decoder:fail', (_e, payload: { id: string; message: string }) => {
+  ipcMain.on('decoder:fail', (event, payload: { id: string; message: string }) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) return
     const p = pending.get(payload.id)
     if (p) {
       pending.delete(payload.id)
       p.reject(new Error(payload.message))
     }
   })
-  ipcMain.on('decoder:export-reply', (_e, payload: { id: string } & ExportRenderResult) => {
+  ipcMain.on('decoder:export-reply', (event, payload: { id: string } & ExportRenderResult) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) return
     const p = exportPending.get(payload.id)
     if (p) {
       exportPending.delete(payload.id)
@@ -105,7 +112,8 @@ function bindListeners(): void {
       p.resolve(result)
     }
   })
-  ipcMain.on('decoder:export-fail', (_e, payload: { id: string; message: string }) => {
+  ipcMain.on('decoder:export-fail', (event, payload: { id: string; message: string }) => {
+    if (!win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) return
     const p = exportPending.get(payload.id)
     if (p) {
       exportPending.delete(payload.id)
@@ -132,13 +140,20 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  readyPromise = new Promise<void>((resolve) => {
-    const onReady = (): void => resolve()
-    ipcMain.once('decoder:ready', onReady)
-    // Safety: also resolve on load in case the ready ping is missed.
-    win!.webContents.once('did-finish-load', () => setTimeout(resolve, 250))
+  readyPromise = new Promise<void>((resolve, reject) => {
+    const created = win!
+    const timer = setTimeout(() => { cleanup(); reject(new Error('디코더 초기화 제한 시간을 초과했습니다.')) }, 20000)
+    const cleanup = (): void => { clearTimeout(timer); ipcMain.removeListener('decoder:ready', onReady) }
+    const onReady = (event: Electron.IpcMainEvent): void => {
+      if (event.sender === created.webContents) { cleanup(); resolve() }
+    }
+    ipcMain.on('decoder:ready', onReady)
+    created.webContents.once('did-fail-load', (_event, _code, message) => { cleanup(); reject(new Error(`디코더 로드 실패: ${message}`)) })
+    created.once('closed', () => { cleanup(); reject(new Error('디코더 창이 닫혔습니다.')) })
   })
 
+  // Warmup can start the window before a caller awaits readiness.
+  void readyPromise.catch(() => {})
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (isDev && devUrl) {
     win.loadURL(`${devUrl}/decoder.html`)
@@ -194,13 +209,22 @@ export async function renderExportViaWindow(
     setTimeout(() => {
       if (exportPending.has(id)) {
         exportPending.delete(id)
-        reject(new Error('Export render timed out'))
+        reject(new Error('내보내기 제한 시간을 초과했습니다. 복원 작업을 중단했습니다.'))
+        cancelExportRender()
       }
-    }, 120000)
+    }, req.editState.denoise > 0 ? 360000 : 120000)
   })
 }
 
+export function cancelExportRender(): void {
+  shutdownAi()
+  for (const [id, item] of exportPending) { item.reject(new Error('내보내기가 취소되었습니다.')); exportPending.delete(id) }
+  shutdownDecodeWindow()
+}
+
 export function shutdownDecodeWindow(): void {
+  for (const [id, item] of pending) { item.reject(new Error('디코딩이 중단되었습니다.')); pending.delete(id) }
+  for (const [id, item] of exportPending) { item.reject(new Error('내보내기가 중단되었습니다.')); exportPending.delete(id) }
   if (win && !win.isDestroyed()) win.destroy()
   win = null
   readyPromise = null

@@ -1,46 +1,10 @@
 /** @type {import('tailwindcss').Config} */
-// Design tokens: "Liquid Glass × Black / Hot Pink". Pink is the ONLY accent.
 module.exports = {
   content: ['./src/renderer/index.html', './src/renderer/src/**/*.{ts,tsx}'],
-  theme: {
-    extend: {
-      colors: {
-        // Core surface
-        base: '#090A0D', // ink near-black, faint cool bias
-        surface: '#14151B',
-        'surface-2': '#1B1C24',
-        // Text
-        ink: '#F5F0F2', // primary text
-        muted: '#8A8691', // muted text
-        faint: '#56535C', // faintest text / tick marks
-        // Accent — hot pink (only accent color allowed)
-        accent: {
-          DEFAULT: '#FF2D78',
-          soft: '#FF6AA5' // gradient end for slider fills
-        }
-      },
-      borderRadius: {
-        panel: '16px',
-        control: '10px'
-      },
-      fontFamily: {
-        sans: ['"Hanken Grotesk"', 'system-ui', 'sans-serif'],
-        display: ['"Bricolage Grotesque"', '"Hanken Grotesk"', 'sans-serif'],
-        mono: ['"Geist Mono"', 'ui-monospace', 'monospace']
-      },
-      backgroundColor: {
-        glass: 'rgba(20, 20, 26, 0.55)'
-      },
-      borderColor: {
-        glass: 'rgba(255, 255, 255, 0.08)'
-      },
-      boxShadow: {
-        glow: '0 0 0 1px rgba(255,45,120,0.35), 0 0 24px rgba(255,45,120,0.25)'
-      },
-      backdropBlur: {
-        glass: '24px'
-      }
-    }
-  },
-  plugins: []
+  theme: { extend: {
+    colors: { base: '#151515', surface: '#1C1C1C', 'surface-2': '#262626', ink: '#EEEEEE', muted: '#A3A3A3', faint: '#A3A3A3', accent: { DEFAULT: '#B7A8F7', soft: '#C7BCF8' } },
+    borderRadius: { panel: '10px', control: '6px' },
+    fontFamily: { sans: ['-apple-system', 'BlinkMacSystemFont', '"Apple SD Gothic Neo"', '"Hanken Grotesk"', 'sans-serif'], display: ['-apple-system', '"Apple SD Gothic Neo"', 'sans-serif'], mono: ['"Geist Mono"', 'ui-monospace', 'monospace'] },
+    backgroundColor: { glass: '#262626' }, borderColor: { glass: '#343434' }
+  } }, plugins: []
 }

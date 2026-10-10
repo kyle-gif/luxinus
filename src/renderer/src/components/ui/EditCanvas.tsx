@@ -9,6 +9,7 @@ import {
   uploadCurveLut,
   type EditUniforms
 } from '../../lib/editShader'
+import { bakeSemanticTexture, semanticTextureKey } from '../../lib/semanticAtlas'
 
 // Live-histogram readback target. Small — we only need the distribution.
 const HW = 192
@@ -56,6 +57,8 @@ interface EditCanvasProps {
   showClip?: boolean
   /** A denoised copy of the source (data URL) blended in by the Denoise slider. */
   denoiseUrl?: string | null
+  /** Comparison snapshots must not overwrite the current edit histogram. */
+  publishHistogram?: boolean
   className?: string
 }
 
@@ -68,6 +71,7 @@ export function EditCanvas({
   overlayMode = 0,
   showClip = false,
   denoiseUrl = null,
+  publishHistogram = true,
   className = ''
 }: EditCanvasProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -76,6 +80,7 @@ export function EditCanvas({
     U: EditUniforms
     lutTex: WebGLTexture
     brushTex: WebGLTexture
+    semanticTex: WebGLTexture
     denoiseTex: WebGLTexture
     /** The proxy texture on unit 0 — replaced (and deleted) per photo. */
     imgTex: WebGLTexture | null
@@ -92,12 +97,14 @@ export function EditCanvas({
   const maskPrevRef = useRef(maskPreview)
   const overlayModeRef = useRef(overlayMode)
   const showClipRef = useRef(showClip)
+  const publishHistogramRef = useRef(publishHistogram)
   editRef.current = edit
   cmpRef.current = compareMode
   splitRef.current = splitPos
   maskPrevRef.current = maskPreview
   overlayModeRef.current = overlayMode
   showClipRef.current = showClip
+  publishHistogramRef.current = publishHistogram
 
   useEffect(() => {
     const cv = canvasRef.current
@@ -110,6 +117,7 @@ export function EditCanvas({
     if (!built) return
     const lutTex = gl.createTexture()!
     const brushTex = gl.createTexture()!
+    const semanticTex = gl.createTexture()!
     const denoiseTex = gl.createTexture()!
     // Bind a 1×1 placeholder on unit 3 so the sampler is always complete.
     gl.activeTexture(gl.TEXTURE3)
@@ -137,6 +145,7 @@ export function EditCanvas({
       U: built.U,
       lutTex,
       brushTex,
+      semanticTex,
       denoiseTex,
       imgTex: null,
       hasDenoise: false,
@@ -153,6 +162,7 @@ export function EditCanvas({
       if (ctx?.imgTex) gl.deleteTexture(ctx.imgTex)
       gl.deleteTexture(lutTex)
       gl.deleteTexture(brushTex)
+      gl.deleteTexture(semanticTex)
       gl.deleteTexture(denoiseTex)
       gl.deleteTexture(histTex)
       gl.deleteFramebuffer(histFbo)
@@ -242,6 +252,7 @@ export function EditCanvas({
     let raf = 0
     let lastKey = ''
     let lastBrush = 'init' // force an initial bake (binds a valid unit-2 texture)
+    let lastSemantic = 'init'
     let useLut = false
     let lastHist = 0
     let lastSig: unknown[] = []
@@ -270,6 +281,11 @@ export function EditCanvas({
             lastBrush = bkey
             bakeBrushTexture(gl, ctx.brushTex, e, dispAspect)
           }
+          const semanticKey = semanticTextureKey(e)
+          if (semanticKey !== lastSemantic) {
+            lastSemantic = semanticKey
+            bakeSemanticTexture(gl, ctx.semanticTex, e)
+          }
           setEditUniforms(gl, U, e, useLut, {
             imgW: ctx.imgW,
             imgH: ctx.imgH,
@@ -285,7 +301,7 @@ export function EditCanvas({
 
         // Real histogram: re-render the edited image (compare off) into a tiny
         // offscreen target, read it back, and bin. Throttled AND change-gated.
-        if (histDirty && now - lastHist > 160) {
+        if (publishHistogramRef.current && histDirty && now - lastHist > 160) {
           lastHist = now
           histDirty = false
           gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.histFbo)

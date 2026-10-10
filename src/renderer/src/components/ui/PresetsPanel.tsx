@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../../store/useStore'
 import { renderPresetThumb, setPresetSource } from '../../lib/presetThumb'
-import type { Preset, XmpImportResult } from '../../../../shared/presets'
+import { applyPreset, type Preset, type XmpImportResult } from '../../../../shared/presets'
+import { useDialogFocus } from './useDialogFocus'
 
 // Presets: a grid of tiles, each a live thumbnail of the current photo with that
 // preset applied (rendered through the shared edit shader). Save the current
@@ -20,6 +21,8 @@ export function PresetsPanel(): JSX.Element {
   const [name, setName] = useState('')
   const [summary, setSummary] = useState<XmpImportResult | null>(null)
   const [importing, setImporting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => () => useStore.getState().setPreviewEdit(null), [selectedPath])
 
   useEffect(() => {
     void loadPresets()
@@ -45,9 +48,7 @@ export function PresetsPanel(): JSX.Element {
 
   async function doSave(): Promise<void> {
     if (!name.trim()) return
-    await savePreset(name.trim())
-    setName('')
-    setNaming(false)
+    try { await savePreset(name.trim()); setName(''); setNaming(false); setError(null) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
 
   async function doImport(): Promise<void> {
@@ -59,13 +60,15 @@ export function PresetsPanel(): JSX.Element {
         await loadPresets()
         setSummary(res)
       }
-    } finally {
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally {
       setImporting(false)
     }
   }
 
   return (
     <div className="space-y-3">
+      {error && <p role="alert" className="text-red-300 text-[12px]">{error}</p>}
+      <p className="text-[12px] text-muted">포인터를 올리거나 키보드로 선택해 미리보기 · 클릭 / Enter로 적용</p>
       <div className="flex gap-2">
         {naming ? (
           <div className="flex flex-1 gap-1">
@@ -77,40 +80,40 @@ export function PresetsPanel(): JSX.Element {
                 if (e.key === 'Enter') void doSave()
                 if (e.key === 'Escape') setNaming(false)
               }}
-              placeholder="Preset name…"
+              placeholder="프리셋 이름" aria-label="프리셋 이름"
               className="flex-1 rounded-control border border-glass bg-black/25 px-2.5 py-1.5 text-[12px] text-ink focus:border-accent/60"
             />
-            <button onClick={doSave} className="rounded-control border border-accent/60 bg-accent/10 px-2.5 text-[11px] text-accent-soft">
-              Save
+            <button onClick={doSave} className="rounded-control border border-accent/60 bg-accent/10 px-2.5 text-[12px] text-accent-soft">
+              저장
             </button>
           </div>
         ) : (
           <>
             <button
               onClick={() => setNaming(true)}
-              className="flex-1 rounded-control border border-glass px-2.5 py-1.5 text-[11px] text-muted hover:text-ink"
+              className="flex-1 rounded-control border border-glass px-2.5 py-1.5 text-[12px] text-muted hover:text-ink"
             >
-              + Save current
+              + 현재 보정 저장
             </button>
             <button
               onClick={doImport}
               disabled={importing}
-              className="rounded-control border border-glass px-2.5 py-1.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+              className="rounded-control border border-glass px-2.5 py-1.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
             >
-              {importing ? 'Importing…' : 'Import .xmp'}
+              {importing ? '가져오는 중…' : '.xmp 가져오기'}
             </button>
           </>
         )}
       </div>
 
       {presets.length === 0 ? (
-        <p className="py-2 text-center text-[11px] text-faint">
-          No presets yet. Save a look or import a Lightroom .xmp.
+        <p className="py-2 text-center text-[12px] text-faint">
+          프리셋이 없습니다. 현재 보정을 저장하거나 Lightroom .xmp 파일을 가져오세요.
         </p>
       ) : (
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 gap-3">
           {presets.map((p) => (
-            <PresetTile key={p.id} preset={p} thumb={thumbs[p.id]} onApply={() => apply(p)} onDelete={() => del(p.id)} />
+            <PresetTile key={p.id} preset={p} thumb={thumbs[p.id]} onApply={() => { useStore.getState().setPreviewEdit(null); apply(p) }} onPreview={() => { const current = useStore.getState(); current.setPreviewEdit(applyPreset(current.edit, p)) }} onClearPreview={() => useStore.getState().setPreviewEdit(null)} onDelete={() => void del(p.id).catch((e) => setError(String(e)))} />
           ))}
         </div>
       )}
@@ -128,34 +131,39 @@ function PresetTile({
   preset,
   thumb,
   onApply,
+  onPreview,
+  onClearPreview,
   onDelete
 }: {
   preset: Preset
   thumb: string | undefined
   onApply: () => void
+  onPreview: () => void
+  onClearPreview: () => void
   onDelete: () => void
 }): JSX.Element {
   return (
     <div className="group relative">
       <button
         onClick={onApply}
-        title={`Apply ${preset.name}`}
-        className="block aspect-square w-full overflow-hidden rounded-md border border-glass transition-colors hover:border-accent/70"
+        onMouseEnter={onPreview} onMouseLeave={onClearPreview} onFocus={onPreview} onBlur={onClearPreview}
+        title={`${preset.name} 적용`}
+        className="block aspect-square w-full overflow-hidden rounded-[2px] border border-glass transition-colors hover:border-accent/70"
       >
         {thumb ? (
-          <img src={thumb} alt={preset.name} className="h-full w-full object-cover" />
+          <img src={thumb} alt={preset.name} className="h-full w-full object-contain" />
         ) : (
           <div className="h-full w-full bg-black/40" />
         )}
       </button>
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/85 to-transparent px-1 pb-0.5 pt-2 text-center text-[8px] text-ink">
+      <div className="truncate px-1 pt-2 text-[12px] text-ink">
         {preset.name}
         {preset.origin === 'xmp' && <span className="text-accent-soft"> ·xmp</span>}
       </div>
       <button
         onClick={onDelete}
-        title="Delete preset"
-        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-white/30 bg-black/80 text-[9px] text-muted group-hover:flex hover:text-accent-soft"
+        title="프리셋 삭제" aria-label={`${preset.name} 프리셋 삭제`}
+        className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full border border-white/30 bg-black/80 text-[12px] text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-accent-soft"
       >
         ✕
       </button>
@@ -174,19 +182,21 @@ function ImportSummary({
   onClose: () => void
   onApply: () => void
 }): JSX.Element {
+  const ref = useDialogFocus(true, onClose)
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-md"
+      className="lx-modal-backdrop"
       onClick={onClose}
     >
       <div
-        className="lx-glass w-[460px] max-w-[92vw] overflow-hidden rounded-panel"
+        ref={ref} role="dialog" aria-modal="true" aria-label="XMP 프리셋 가져오기 결과" tabIndex={-1}
+        className="lx-modal w-[460px] max-w-[92vw] overflow-hidden rounded-panel"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-5 pt-5">
           <div>
-            <span className="lx-eyebrow">Lightroom preset imported</span>
+            <span className="lx-eyebrow">Lightroom 프리셋 가져오기 결과</span>
             <h3 className="lx-display mt-1 text-[18px] font-semibold leading-tight text-ink">
               {result.name}
             </h3>
@@ -202,9 +212,8 @@ function ImportSummary({
         {/* Honesty notice */}
         <div className="mx-5 mt-4 flex gap-2.5 rounded-control border border-accent/25 bg-accent/[0.05] px-3 py-2.5">
           <span className="mt-px text-[12px] text-accent-soft">≈</span>
-          <p className="text-[11px] leading-snug text-muted">
-            <span className="text-ink">Approximate mapping.</span> Luxinus and Adobe render
-            differently, so the look may not match exactly.
+          <p className="text-[12px] leading-snug text-muted">
+            <span className="text-ink">지원 항목을 근사 변환했습니다.</span> Luxinus와 Adobe의 렌더링 방식이 달라 결과가 정확히 같지는 않습니다.
           </p>
         </div>
 
@@ -213,21 +222,21 @@ function ImportSummary({
           <section>
             <div className="mb-2 flex items-center gap-2">
               <span className="h-3 w-[2px] rounded-full bg-accent" />
-              <span className="lx-eyebrow">Applied · {result.mapped.length}</span>
+              <span className="lx-eyebrow">변환 지원 · {result.mapped.length}</span>
             </div>
             {result.mapped.length ? (
               <div className="flex flex-wrap gap-1.5">
                 {result.mapped.map((m) => (
                   <span
                     key={m}
-                    className="lx-num rounded-md border border-glass bg-white/[0.03] px-2 py-1 text-[10px] text-ink"
+                    className="lx-num rounded-md border border-glass bg-white/[0.03] px-2 py-1 text-[12px] text-ink"
                   >
                     {m}
                   </span>
                 ))}
               </div>
             ) : (
-              <p className="text-[11px] text-faint">No recognizable adjustments in this file.</p>
+              <p className="text-[12px] text-faint">인식 가능한 보정 항목이 없습니다.</p>
             )}
           </section>
 
@@ -236,13 +245,13 @@ function ImportSummary({
             <section>
               <div className="mb-2 flex items-center gap-2">
                 <span className="h-3 w-[2px] rounded-full bg-white/20" />
-                <span className="lx-eyebrow">Not supported · {result.ignored.length}</span>
+                <span className="lx-eyebrow">지원하지 않음 · {result.ignored.length}</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {result.ignored.map((m) => (
                   <span
                     key={m}
-                    className="lx-num rounded-md px-1.5 py-0.5 text-[10px] text-faint line-through decoration-white/20"
+                    className="lx-num rounded-md px-1.5 py-0.5 text-[12px] text-faint line-through decoration-white/20"
                   >
                     {m}
                   </span>
@@ -258,13 +267,13 @@ function ImportSummary({
             onClick={onClose}
             className="rounded-control px-3.5 py-2 text-[12px] text-muted transition-colors hover:text-ink"
           >
-            Keep as preset
+            프리셋으로 보관
           </button>
           <button
             onClick={onApply}
             className="rounded-control border border-accent/60 bg-accent/10 px-4 py-2 text-[12px] font-medium text-accent-soft transition-colors hover:bg-accent/[0.16]"
           >
-            Apply now
+            현재 사진에 적용
           </button>
         </div>
       </div>

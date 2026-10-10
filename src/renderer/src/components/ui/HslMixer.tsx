@@ -33,9 +33,11 @@ export function HslMixer(): JSX.Element {
             <button
               key={b}
               onClick={() => setBand(b)}
-              title={b}
+              title={{ red: '빨강', orange: '주황', yellow: '노랑', green: '초록', aqua: '청록', blue: '파랑', purple: '보라', magenta: '자홍' }[b]}
+              aria-label={{ red: '빨강', orange: '주황', yellow: '노랑', green: '초록', aqua: '청록', blue: '파랑', purple: '보라', magenta: '자홍' }[b]}
+              aria-pressed={band === b}
               className={`relative h-6 flex-1 rounded-[5px] transition-transform ${
-                band === b ? 'ring-2 ring-white/70' : 'hover:scale-105'
+                band === b ? 'ring-2 ring-white/70' : 'hover:ring-1 hover:ring-white/30'
               }`}
               style={{ background: BAND_SWATCH[b] }}
             >
@@ -48,9 +50,9 @@ export function HslMixer(): JSX.Element {
       </div>
 
       <div className="space-y-3.5 pt-1">
-        <Slider label="Hue" gradient="hue" value={adj.hue} onChange={(v) => setHsl(band, { hue: v })} />
-        <Slider label="Saturation" value={adj.sat} onChange={(v) => setHsl(band, { sat: v })} />
-        <Slider label="Luminance" value={adj.lum} onChange={(v) => setHsl(band, { lum: v })} />
+        <Slider label="색상" gradient="hue" value={adj.hue} onChange={(v) => setHsl(band, { hue: v })} />
+        <Slider label="채도" value={adj.sat} onChange={(v) => setHsl(band, { sat: v })} />
+        <Slider label="밝기" value={adj.lum} onChange={(v) => setHsl(band, { lum: v })} />
       </div>
     </div>
   )

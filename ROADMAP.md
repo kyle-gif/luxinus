@@ -1,87 +1,23 @@
-# Luxinus — Roadmap
+# Luxinus 작업 상태
 
-Fully local, on-device RAW + AI photo editor. Every phase must typecheck, build,
-and run before the next begins. Nothing about a photo (pixels, path, EXIF, edit
-history) ever leaves the machine.
+2026-09-09 로컬 통합 지시서 기준입니다. 구현과 실제 실행 검증을 분리해 기록합니다.
 
-## Shipped
-
-| Phase | Scope | Status |
+| 우선순위 | 구현한 범위 | 남은 작업 |
 | --- | --- | --- |
-| 0 | Local-only Electron shell (locked CSP, `connect-src 'none'`) | ✅ |
-| 1 | Library + RAW proxy pipeline (hidden decode window, 11 manufacturers, embedded-JPEG fallback) | ✅ |
-| 2 | Non-destructive editing + WebGL develop shader + sidecar persistence | ✅ |
-| 3 | Export — JPEG/PNG/TIFF, 3 EXIF modes (Keep/Strip/Frame), no-overwrite | ✅ |
-| 4 | Presets — native JSON save/apply/delete + Lightroom `.xmp` import | ✅ |
+| P0 현황·안전성 | 현재 main 보존, 타입/빌드, 경로·IPC·sidecar 검증, 실제 Electron/원본 해시 확인 | 실제 RAW 카메라 샘플, renderer 충돌 복구 UI 검증 |
+| P1 사진 UI | 사진 목록/사진 편집, 전역 Undo, 자르기·수평 통합, 쉬운 용어, 중립 테마, 가상화, 선택/필터, 패널, 사진만 보기, 저장 오류, 실제1440/1024 화면·모달, 원본 좌표에 고정되는 인물 마스크 | 모든 도구 수동 회귀, 기존 수동 마스크의 원본 좌표 전환 |
+| P2 로컬 추론 | 공식 Qwen/llama.cpp 설치·체크섬·실제 한국어 추론, OS 모델 sandbox·취소·메모리 실측, 실제 Electron NAFNet CPU 추론 | 앱 내 다운로드 관리자, 큰 모델의 EV/상대 계산 품질 검증 |
+| P3 제안·XMP | 공식 Codex 로그인/왼쪽 채팅·보정 반영 이미지 입력·모델/추론 선택·앱 전용 도구·제안별 비교, GPT-6-Astra 실제 사진 입력/도구 호출 확인, 로컬 한 장 절대 수치 제안→픽셀 미리보기→승인 저장→Undo/Redo→새 프로세스 복원, XMP byte 보존 승인/Undo | 로컬 모델의 EV·상대 계산 품질, 다양한 실제 사진의 Codex 보정 품질 검증, 별도 개발 에이전트 |
+| P4 사진 AI | NAFNet SIDD 노이즈 제거·품질 측정, 복원 픽셀 자동 저장·재사용, 원본 크기 export, 배경색 독립, 취소/worker 재시작, CNN 인물·얼굴 부위 8종 자동 마스크, 에이전트 마스크·크롭·사진 캡처 도구 | 실카메라 고ISO 품질 비교, 다양한 인물 분할 품질 측정, 의미 검색, Smart Cull, 업스케일 |
 
-## Phase 5 — Geometry & local masks *(non-AI)* — ✅ core complete
+추가 작업:
 
-The manual, deterministic editing layer that needs **no** model inference. Lands
-before the AI stack so the develop pipeline is feature-complete on its own.
+- 재연결: 누락/교체 원본은 오류와 폴더 다시 열기를 안내합니다. 다른 위치의 원본에 기존 카탈로그 ID·편집을 재연결하는 기능은 아직 없습니다.
+- 카메라·렌즈·ISO·날짜 고급 필터, 프리셋 강도·변형 저장, 여러 사진 동일 위치 비교.
+- 16비트/선형 RAW 파이프라인과 검증된 카메라·렌즈 프로필. 현재 8비트 sRGB 경로를 고정밀 RAW 복원으로 표현하지 않습니다.
+- XMP 재시작 후 journal 복구 UI. 변경 전 원문은 로컬 journal에 남고 현재 실행 중 Undo는 지원합니다.
+- 일괄 동기화의 작업별 Undo/journal·중단·항목 선택. 현재는 대상 사진의 자르기·회전·마스크·RGB 복원 강도를 보존하고 빛/색/효과를 복사하며, 일부 실패 수를 표시합니다.
+- 메모리 압력 측정과 모델 동시 상주 예산. 현재 텍스트 추론은 작업 후 프로세스를 종료하고, 복원·인물 분석은 공통 실행 잠금으로 동시에 추론하지 않으며 idle 해제를 사용합니다.
+- 필름 룩 고급 bloom/halation, 음성, 생성 복원은 핵심 흐름 검증 이후 진행합니다.
 
-- ✅ **Interactive crop UI** — on-image rectangle with drag handles, aspect lock
-  (free / original / 1:1 / 3:2 / 2:3 / 4:5 / 16:9), rule-of-thirds grid, scrim,
-  `C`/`Esc` shortcuts. Applied crop drives the display aspect; export sizes to it.
-- ✅ **Straighten guide** — alignment grid overlays the image while the Straighten
-  slider is dragged. (Flip H/V already present.)
-- ✅ **Local-adjustment masks** — `masks: Mask[]` on `EditState`, each with its own
-  adjustment subset (exposure/contrast/tone/WB/sat/clarity), composited per-pixel
-  in `editShader.ts`. **Radial** + **linear** are parametric; **brush** paints into
-  a channel-packed RGBA coverage texture (up to 4 brush masks) — WebGL1-safe (no
-  dynamic sampler indexing). Interactive gizmos on the stage; masks persist to the
-  sidecar, participate in undo/redo, and render identically on export.
-  AI-assisted selection (SAM2) comes later in Phase 8 and reuses this mask path.
-
-Remaining polish ideas (optional): mask rename, duplicate, per-mask opacity, and a
-crop-time 90° rotate.
-
-## Phase 6 — AI inference infrastructure + denoise *(was Phase 5)* — ✅ core built
-
-The ONNX runtime layer, built to the OOM-avoidance rules (mandatory):
-
-- ✅ **onnxruntime-node** integrated (native; rebuilt to Electron's ABI via the
-  `install-app-deps` postinstall). All inference runs in a dedicated **utility
-  process** (`src/workers/onnx.worker.ts`), orchestrated by `src/main/onnx.ts`.
-- ✅ **Execution-provider ladder** — CoreML (mac) / DirectML (win) / CUDA (linux),
-  falling back to CPU when a provider isn't in the build.
-- ✅ **Tiled inference** (`src/workers/lib/tiledInference.ts`) — fixed valid tiles
-  (the NAFNet export only accepts ≥384px), reflect-padded edges, raised-cosine
-  blend; **validated seamless** on a real image.
-- ✅ **Sequential sessions** (one alive at a time), a **tile-size OOM ladder**
-  (768→512→384 rather than halving into invalid sizes), and **graceful
-  degradation** (returns the original image; never crashes).
-- ✅ **F3 AI denoise (NAFNet, RGB)** — model at `models/nafnet.onnx` (OpenCV Model
-  Zoo, Apache; gitignored, not bundled). A "Run AI denoise" action computes a
-  restored proxy behind a progress bar; the develop shader blends it in by the
-  Denoise slider (real-time strength), backward-safe when absent.
-
-Remaining Phase 6 items:
-- **Export-time full-res denoise** (route the export render through the utility
-  process) — preview denoise works on the proxy today; export renders without it.
-- Swap the deblur checkpoint for a NAFNet-SIDD **denoise** checkpoint (identical
-  I/O — drop-in) for stronger denoising; add FP16 model support (current is FP32).
-- Real VRAM probing for GPU providers (CPU path uses the OOM ladder).
-- **Prerequisite — high-bit-depth pipeline (deferred here, tracked):** today the
-  develop pipeline runs on an **8-bit sRGB proxy** (`decoder.ts` decodes RAW at
-  `outputBps:8`, WebP-encoded), so true RAW latitude / highlight recovery isn't
-  available. A **16-bit / half-float linear** proxy (`outputBps:16` + no
-  auto-bright, non-WebP transport, float WebGL textures, tone-mapping in the
-  shader) is required to actually use the RAW's dynamic range — it lands with the
-  AI work since models also want linear high-bit input.
-
-## Later
-
-| Phase | Scope |
-| --- | --- |
-| 7 | AI upscale (HAT → SUPIR) |
-| 8 | AI masking + object removal (SAM2 auto-select + LaMa inpaint), reusing the Phase 5 mask path |
-| 9 | Onboarding + polish + packaging (electron-builder dmg/NSIS) |
-
-## Non-negotiables (all phases)
-
-1. **Local-only.** No network except an optional explicit update check. CSP stays
-   `default-src 'self'` / `connect-src 'none'`.
-2. Heavy work runs off the UI thread (worker / utility / hidden window).
-3. Non-destructive: edits live in `<file>.lux.json` (atomic temp+rename); original
-   bytes/mtime never change.
-4. Graceful fallback on any AI failure or OOM.
+검사별 결과·재개 방법은 [로컬 개발 기록](docs/local-development-2026-09-09.md)을 참조하세요. 과거 README의 제조사 11종/특정 ONNX 성능 수치는 이번 실행으로 재검증한 결과가 아닙니다.

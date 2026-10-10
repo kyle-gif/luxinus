@@ -25,7 +25,7 @@ const GEOMETRY_DEFAULTS = {
 
 // Capture the current edit as a preset payload (geometry stripped).
 export function captureAsPreset(edit: EditState): EditState {
-  return { ...edit, ...GEOMETRY_DEFAULTS }
+  return { ...edit, ...GEOMETRY_DEFAULTS, masks: edit.masks.filter(mask => mask.kind !== 'semantic') }
 }
 
 // Apply a preset to the current edit, preserving the photo's geometry.
@@ -36,7 +36,8 @@ export function applyPreset(current: EditState, preset: Preset): EditState {
     crop: current.crop,
     rotate: current.rotate,
     flipH: current.flipH,
-    flipV: current.flipV
+    flipV: current.flipV,
+    masks: [...coerceEditState(preset.edits).masks.filter(mask => mask.kind !== 'semantic'), ...current.masks.filter(mask => mask.kind === 'semantic')]
   }
 }
 

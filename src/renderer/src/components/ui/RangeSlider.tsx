@@ -1,3 +1,4 @@
+import { useEditGesture } from '../../lib/useEditGesture'
 import { useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 // Dual-handle range slider (lo..hi within 0..100) in the house slider style:
@@ -23,6 +24,7 @@ export function RangeSlider({
   const trackRef = useRef<HTMLDivElement>(null)
   // Which handle a drag (or keyboard focus) is steering.
   const [active, setActive] = useState<'lo' | 'hi' | null>(null)
+  const gesture = useEditGesture()
 
   function valueAt(clientX: number): number {
     const el = trackRef.current
@@ -32,6 +34,7 @@ export function RangeSlider({
   }
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>): void {
+    if (!gesture.begin()) return
     e.currentTarget.setPointerCapture(e.pointerId)
     const v = valueAt(e.clientX)
     // Grab whichever handle is nearer (ties go to lo when below both).
@@ -40,11 +43,12 @@ export function RangeSlider({
     apply(which, v)
   }
   function onPointerMove(e: ReactPointerEvent<HTMLDivElement>): void {
-    if (active) apply(active, valueAt(e.clientX))
+    if (active && gesture.isActive()) apply(active, valueAt(e.clientX))
   }
   function onPointerUp(e: ReactPointerEvent<HTMLDivElement>): void {
+    gesture.end()
     setActive(null)
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
   }
   function apply(which: 'lo' | 'hi', v: number): void {
     if (which === 'lo') onChange(Math.min(v, hi), hi)
@@ -60,6 +64,7 @@ export function RangeSlider({
       else if (e.key === 'End') next = 100
       else return
       e.preventDefault()
+      e.stopPropagation()
       apply(which, clamp(next, 0, 100))
     }
   }
@@ -67,8 +72,8 @@ export function RangeSlider({
   return (
     <div className="w-full">
       <div className="mb-1.5 flex items-baseline justify-between">
-        <span className="text-[11.5px] font-medium tracking-wide text-muted">{label}</span>
-        <span className="lx-num text-[11px] text-accent-soft">
+        <span className="text-[12px] font-medium tracking-wide text-muted">{label}</span>
+        <span className="lx-num text-[12px] text-accent-soft">
           {lo}–{hi}
         </span>
       </div>
@@ -78,6 +83,7 @@ export function RangeSlider({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onLostPointerCapture={onPointerUp}
         className="relative flex h-5 cursor-pointer touch-none items-center"
       >
         {track === 'lum' ? (
@@ -103,7 +109,7 @@ export function RangeSlider({
               key={which}
               role="slider"
               tabIndex={0}
-              aria-label={`${label} ${which === 'lo' ? 'lower' : 'upper'} bound`}
+              aria-label={`${label} ${which === 'lo' ? '하한' : '상한'}`}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={v}

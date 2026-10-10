@@ -2,10 +2,8 @@
 // onnxruntime imports so it can be unit-tested and shared: the caller passes a
 // `run(tileFloat, size) => Promise<Float32Array>` that executes one square tile.
 //
-// The model was exported with a channel-attention pooling that only accepts
-// spatial sizes ≥ 384 (256/128 fail), so tiles are a FIXED square size from a
-// safe ladder; edge tiles are reflect-padded up to the full tile and cropped
-// back. Tiles overlap and blend with a raised-cosine window to hide seams.
+// Callers supply a tile size accepted by their verified graph. Edge tiles are
+// reflect-padded; overlaps blend with a raised-cosine window to hide seams.
 
 export interface TileRunner {
   (input: Float32Array, size: number): Promise<Float32Array> // NCHW RGB in/out, [1,3,size,size]
@@ -56,6 +54,8 @@ export async function runTiled(
 ): Promise<Float32Array> {
   const tile = opts.tile
   const overlap = opts.overlap ?? 32
+  if (!Number.isSafeInteger(W) || !Number.isSafeInteger(H) || W < 1 || H < 1 || src.length !== W * H * 3) throw new Error('Invalid tiled image dimensions')
+  if (!Number.isSafeInteger(tile) || tile < 1 || !Number.isSafeInteger(overlap) || overlap < 0 || overlap >= tile) throw new Error('Invalid tile size or overlap')
   const stride = Math.max(1, tile - overlap)
   const xs = origins(W, tile, stride)
   const ys = origins(H, tile, stride)
@@ -83,6 +83,7 @@ export async function runTiled(
       }
 
       const res = await runner(tileBuf, tile)
+      if (res.length !== tile * tile * 3) throw new Error('Invalid tile output dimensions')
 
       // Accumulate only the in-bounds region, weighted by the feather window.
       const yMax = Math.min(tile, H - y0)

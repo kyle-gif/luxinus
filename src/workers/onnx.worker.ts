@@ -5,14 +5,15 @@
 //   • tiled inference (fixed square tiles, reflect-padded, cosine-blended)
 //   • provider probing → CoreML / DirectML / CUDA with CPU fallback
 //   • sequential sessions: exactly one ONNX session alive at a time
-//   • tile-size OOM ladder (768 → 512 → 384) instead of halving into sizes the
-//     model rejects; final fallback returns the original image (never crash)
+//   • fixed 768px SIDD graph: report OOM instead of fabricating a result
 import os from 'node:os'
+import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import type { InferenceSession, Tensor } from 'onnxruntime-node'
 import {
-  DEFAULT_TILE,
-  TILE_LADDER,
-  TILE_OVERLAP,
+  RESTORATION_MODEL,
+  RESTORATION_MODEL_FINGERPRINT,
+  RESTORATION_SESSION_OPTIONS,
   type ExecutionProvider,
   type OnnxWorkerRequest,
   type OnnxWorkerResponse
@@ -20,6 +21,7 @@ import {
 import { planarToRgba, rgbaToPlanar, runTiled } from './lib/tiledInference'
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const ort = require('onnxruntime-node') as typeof import('onnxruntime-node')
 
 const parent = (process as unknown as { parentPort?: NodeJS.EventEmitter & { postMessage(m: unknown): void } }).parentPort
@@ -37,10 +39,10 @@ function log(...args: unknown[]): void {
 let session: InferenceSession | null = null
 let sessionKey = ''
 let sessionProvider: ExecutionProvider = 'CPU'
+let sessionFellBack = false
 
-// Provider order. NOTE: for this NAFNet graph, CoreML measured ~8× SLOWER than
-// CPU on Apple silicon (heavy CPU↔ANE partitioning: ~9s/tile vs ~1.2s/tile), so
-// CPU is preferred on macOS. Set LUXINUS_ONNX_EP=coreml|dml|cuda|cpu to override.
+// CPU is the measured macOS baseline for the SIDD graph. Other platforms try
+// their native provider first. LUXINUS_ONNX_EP is an explicit diagnostic override.
 function epOrder(): { ep: string; label: ExecutionProvider }[] {
   const override = process.env.LUXINUS_ONNX_EP?.toLowerCase()
   const cpu = { ep: 'cpu', label: 'CPU' as ExecutionProvider }
@@ -53,119 +55,79 @@ function epOrder(): { ep: string; label: ExecutionProvider }[] {
   if (override && map[override]) return [map[override], cpu]
   if (process.platform === 'win32') return [{ ep: 'dml', label: 'DirectML' }, cpu]
   if (process.platform === 'linux') return [{ ep: 'cuda', label: 'CUDA' }, cpu]
-  return [cpu] // macOS: CPU is fastest for this model
+  return [cpu]
 }
 
-async function getSession(modelPath: string): Promise<InferenceSession> {
-  if (session && sessionKey === modelPath) return session
+async function getSession(modelPath: string, fingerprint: string): Promise<InferenceSession> {
+  if (fingerprint !== RESTORATION_MODEL_FINGERPRINT) throw new Error('지원하지 않는 노이즈 제거 모델입니다.')
+  const key = `${modelPath}:${fingerprint}`
+  if (session && sessionKey === key) return session
   if (session) {
     await session.release?.().catch(() => {})
     session = null
   }
-  for (const { ep, label } of epOrder()) {
+  // Create the session from the exact verified bytes, closing the hash-to-load
+  // path replacement race. The worker retains only the resulting ORT session.
+  const bytes = await readFile(modelPath)
+  if (createHash('sha256').update(bytes).digest('hex') !== RESTORATION_MODEL.sha256) throw new Error('노이즈 제거 모델 체크섬 검증에 실패했습니다.')
+  const providers = epOrder()
+  for (const [providerIndex, { ep, label }] of providers.entries()) {
     const t0 = Date.now()
     try {
-      session = await ort.InferenceSession.create(modelPath, {
+      session = await ort.InferenceSession.create(bytes, {
         executionProviders: [ep],
-        graphOptimizationLevel: 'all'
+        ...RESTORATION_SESSION_OPTIONS,
+        logSeverityLevel: 3
       })
       sessionProvider = label
-      sessionKey = modelPath
+      sessionKey = key
+      sessionFellBack = providerIndex > 0
       log(`session ready · provider=${label} · load=${Date.now() - t0}ms`)
       return session
     } catch (e) {
       log(`provider ${label} unavailable (${String((e as Error).message).slice(0, 50)}) — trying next`)
     }
   }
-  session = await ort.InferenceSession.create(modelPath)
-  sessionProvider = 'CPU'
-  sessionKey = modelPath
-  log('session ready · provider=CPU (last resort)')
-  return session
-}
-
-// Light "VRAM probe": on GPU providers, start smaller when system memory is
-// modest; on CPU the ladder + OOM catch handle the rest.
-function pickInitialTile(): number {
-  const freeGB = os.freemem() / 1024 ** 3
-  if (freeGB < 2) return 384
-  if (freeGB > 6) return DEFAULT_TILE
-  return DEFAULT_TILE
-}
-
-function isOom(err: unknown): boolean {
-  const m = String((err as Error)?.message ?? err).toLowerCase()
-  return m.includes('memory') || m.includes('alloc') || m.includes('oom') || m.includes('bad_alloc')
+  throw new Error('노이즈 제거 모델을 실행할 수 있는 ONNX 제공자가 없습니다.')
 }
 
 async function denoise(req: Extract<OnnxWorkerRequest, { type: 'denoise' }>): Promise<void> {
-  const { requestId, modelPath, rgba, width: W, height: H, strength } = req
-  const megapx = ((W * H) / 1e6).toFixed(1)
-  log(`denoise start · ${W}×${H} (${megapx}MP) · strength=${strength} · freeMem=${(os.freemem() / 1024 ** 3).toFixed(1)}GB`)
+  const { requestId, modelPath, modelFingerprint, rgba, width: W, height: H, strength } = req
   const tSession = Date.now()
-  const sess = await getSession(modelPath)
-  const inName = sess.inputNames[0]
-  const outName = sess.outputNames[0]
-  const src = rgbaToPlanar(rgba, W, H)
-
-  // Candidate tile sizes: start at the probed size, then step DOWN the ladder.
-  const start = pickInitialTile()
-  const ladder = TILE_LADDER.filter((t) => t <= start)
-  let fellBack = false
-
-  for (let i = 0; i < ladder.length; i++) {
-    const tile = ladder[i]
-    let tileCount = 0
-    let tileMs = 0
+  const sess = await getSession(modelPath, modelFingerprint)
+  if (sess.inputNames.length !== 1 || sess.inputNames[0] !== RESTORATION_MODEL.input || sess.outputNames.length !== 1 || sess.outputNames[0] !== RESTORATION_MODEL.output) throw new Error('검증된 NAFNet SIDD 입출력 규격이 아닙니다.')
+  let tileCount = 0
+  let tileMs = 0
+  const runner = async (input: Float32Array, size: number): Promise<Float32Array> => {
+    if (size !== RESTORATION_MODEL.tile) throw new Error('NAFNet SIDD 입력은 768픽셀 타일이어야 합니다.')
+    const tensor: Tensor = new ort.Tensor('float32', input, [1, 3, size, size])
+    let output: InferenceSession.OnnxValueMapType | undefined
+    const tt = Date.now()
     try {
-      const runner = async (input: Float32Array, size: number): Promise<Float32Array> => {
-        const t: Tensor = new ort.Tensor('float32', input, [1, 3, size, size])
-        const tt = Date.now()
-        const out = await sess.run({ [inName]: t })
-        tileMs += Date.now() - tt
-        tileCount++
-        return out[outName].data as Float32Array
-      }
-      const restored = await runTiled(src, W, H, runner, {
-        tile,
-        overlap: TILE_OVERLAP,
-        onProgress: (f) => post({ type: 'denoise:progress', requestId, progress: f })
-      })
-      log(
-        `denoise done · provider=${sessionProvider} · tile=${tile} · ${tileCount} tiles · ` +
-          `${(tileMs / Math.max(1, tileCount)).toFixed(0)}ms/tile · infer=${(tileMs / 1000).toFixed(1)}s · ` +
-          `total=${((Date.now() - tSession) / 1000).toFixed(1)}s`
-      )
-      const outRgba = planarToRgba(restored, rgba, W, H, strength / 100)
-      post({
-        type: 'denoise:result',
-        requestId,
-        rgba: outRgba,
-        width: W,
-        height: H,
-        provider: sessionProvider,
-        fellBack: fellBack || i > 0
-      })
-      return
-    } catch (err) {
-      if (isOom(err) && i < ladder.length - 1) {
-        log(`OOM at tile=${tile} — stepping down to ${ladder[i + 1]}`)
-        fellBack = true
-        continue // step down to a smaller tile and retry
-      }
-      log(`denoise failed (${String((err as Error).message).slice(0, 80)}) — returning original`)
-      // Graceful degradation: return the original image untouched, flagged.
-      post({
-        type: 'denoise:result',
-        requestId,
-        rgba,
-        width: W,
-        height: H,
-        provider: sessionProvider,
-        fellBack: true
-      })
-      return
+      output = await sess.run({ [RESTORATION_MODEL.input]: tensor })
+      tileMs += Date.now() - tt
+      tileCount++
+      const result = output[RESTORATION_MODEL.output]
+      if (result.type !== 'float32' || result.dims.length !== 4 || result.dims[0] !== 1 || result.dims[1] !== 3 || result.dims[2] !== size || result.dims[3] !== size) throw new Error('노이즈 제거 모델 출력 크기가 유효하지 않습니다.')
+      const data = new Float32Array(result.data as Float32Array)
+      if (data.some((v) => !Number.isFinite(v))) throw new Error('노이즈 제거 모델이 잘못된 픽셀을 반환했습니다.')
+      return data
+    } finally {
+      tensor.dispose()
+      if (output) for (const value of Object.values(output)) value.dispose()
     }
+  }
+  try {
+    const restored = await runTiled(rgbaToPlanar(rgba, W, H), W, H, runner, {
+      tile: RESTORATION_MODEL.tile,
+      overlap: RESTORATION_MODEL.overlap,
+      onProgress: (progress) => post({ type: 'denoise:progress', requestId, progress })
+    })
+    log(`denoise done · provider=${sessionProvider} · tile=${RESTORATION_MODEL.tile} · ${tileCount} tiles · infer=${tileMs}ms · total=${Date.now() - tSession}ms · freeMem=${(os.freemem() / 1024 ** 3).toFixed(1)}GB`)
+    post({ type: 'denoise:result', requestId, rgba: planarToRgba(restored, rgba, W, H, strength / 100), width: W, height: H, provider: sessionProvider, fellBack: sessionFellBack })
+  } catch (error) {
+    // The verified graph is static. Silently retrying at 512/384 is invalid.
+    throw new Error(`노이즈 제거 실패: ${(error as Error).message}`)
   }
 }
 

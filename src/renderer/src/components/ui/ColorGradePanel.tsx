@@ -10,10 +10,10 @@ import { Slider } from './Slider'
 // hairline) — the wheel's own hues carry the color.
 
 const REGION_LABEL: Record<ColorGradeRegionKey, string> = {
-  shadows: 'Shadows',
-  midtones: 'Midtones',
-  highlights: 'Highlights',
-  global: 'Global'
+  shadows: '어두운 부분',
+  midtones: '중간 밝기',
+  highlights: '밝은 부분',
+  global: '전체'
 }
 
 // hue (0..360) + sat (0..1) → a display swatch color.
@@ -39,7 +39,7 @@ export function ColorGradePanel(): JSX.Element {
             <button
               key={k}
               onClick={() => setRegion(k)}
-              className={`relative flex flex-col items-center gap-1 rounded-control border py-1.5 text-[9px] transition-colors ${
+              className={`relative flex flex-col items-center gap-1 rounded-control border py-1.5 text-[12px] transition-colors ${
                 active ? 'border-accent/60 bg-accent/[0.07] text-accent-soft' : 'border-glass text-muted hover:text-ink'
               }`}
             >
@@ -65,23 +65,23 @@ export function ColorGradePanel(): JSX.Element {
             {(r.sat !== 0 || r.lum !== 0) && (
               <button
                 onClick={() => setColorGrade(region, { hue: 0, sat: 0, lum: 0 })}
-                className="text-[10px] text-faint transition-colors hover:text-accent-soft"
+                className="text-[12px] text-faint transition-colors hover:text-accent-soft"
               >
-                reset
+                초기화
               </button>
             )}
           </div>
-          <div className="lx-num flex justify-between text-[10px] text-muted">
+          <div className="lx-num flex justify-between text-[12px] text-muted">
             <span>H {Math.round(r.hue)}°</span>
             <span>S {Math.round(r.sat)}</span>
           </div>
-          <Slider label="Luminance" value={r.lum} onChange={(v) => setColorGrade(region, { lum: v })} />
+          <Slider label="밝기" value={r.lum} onChange={(v) => setColorGrade(region, { lum: v })} />
         </div>
       </div>
 
       <div className="space-y-3 border-t border-glass pt-3">
-        <Slider label="Blending" min={0} max={100} value={grade.blending} onChange={(v) => setParam({ blending: v })} />
-        <Slider label="Balance" value={grade.balance} onChange={(v) => setParam({ balance: v })} />
+        <Slider label="혼합" min={0} max={100} value={grade.blending} onChange={(v) => setParam({ blending: v })} />
+        <Slider label="균형" value={grade.balance} onChange={(v) => setParam({ balance: v })} />
       </div>
     </div>
   )

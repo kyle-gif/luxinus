@@ -1,77 +1,25 @@
 import { useStore } from '../../store/useStore'
 import type { PhotoVM } from '../../types'
-
 interface ThumbnailProps {
   photo: PhotoVM
   active: boolean
-  /** In the multi-selection set (for batch operations). */
   selected?: boolean
   onClick: (e: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }) => void
+  onDoubleClick?: () => void
   className?: string
+  showName?: boolean
 }
-
-// A single library thumbnail. Shows the decoded webp once it streams in;
-// otherwise a subtle placeholder with the filename. Active = pink hairline + tick;
-// multi-selected = softer pink ring + tick. Rating/flag are small indicators.
-export function Thumbnail({ photo, active, selected = false, onClick, className = '' }: ThumbnailProps): JSX.Element {
+export function Thumbnail({ photo, active, selected = false, onClick, onDoubleClick, className = '', showName = false }: ThumbnailProps): JSX.Element {
   const edited = useStore((s) => s.editedPaths.has(photo.filePath))
-  return (
-    <button
-      onClick={(e) => onClick({ metaKey: e.metaKey, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey })}
-      title={photo.fileName}
-      className={`lx-squish lx-tile group relative overflow-hidden rounded-md border ${
-        active ? 'border-accent' : selected ? 'border-accent/45' : 'border-glass hover:border-white/25'
-      } ${className}`}
-    >
-      {photo.thumbUrl ? (
-        <img
-          src={photo.thumbUrl}
-          alt={photo.fileName}
-          loading="lazy"
-          className="h-full w-full object-cover"
-        />
-      ) : (
-        <div className="flex h-full w-full items-center justify-center bg-black/45">
-          <span className="lx-num px-1 text-center text-[8px] leading-tight text-faint">
-            {photo.fileName}
-          </span>
-        </div>
-      )}
-
-      {/* RAW badge */}
-      {photo.isRaw && (
-        <span className="lx-num absolute left-1 top-1 rounded bg-black/60 px-1 text-[7px] uppercase text-muted">
-          raw
-        </span>
-      )}
-
-      {/* Edited badge — has a sidecar with non-default edits. */}
-      {edited && (
-        <span
-          title="Edited"
-          className="absolute right-1 top-1 flex h-3 w-3 items-center justify-center rounded-full bg-accent/90 text-[7px] text-white"
-        >
-          ◆
-        </span>
-      )}
-
-      {/* Flag + rating indicators */}
-      <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between bg-gradient-to-t from-black/70 to-transparent px-1 pb-0.5 pt-2 opacity-0 transition-opacity group-hover:opacity-100 data-[show=true]:opacity-100"
-        data-show={photo.rating > 0 || photo.flagged}>
-        <span className="lx-num text-[8px] text-accent-soft">
-          {photo.rating > 0 ? '★'.repeat(photo.rating) : ''}
-        </span>
-        {photo.flagged && <span className="h-1.5 w-1.5 rounded-full bg-accent" title="Flagged" />}
-      </div>
-
-      {active && <span className="absolute inset-x-0 top-0 h-[2px] bg-accent" />}
-
-      {/* Multi-selection tick (shown when part of a batch selection, not active). */}
-      {selected && !active && (
-        <span className="absolute left-1 top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border border-accent/70 bg-black/60 text-[8px] text-accent-soft">
-          ✓
-        </span>
-      )}
-    </button>
-  )
+  return <button onClick={onClick} onDoubleClick={onDoubleClick} title={photo.fileName}
+    aria-label={`${photo.fileName}${active ? ', 현재 사진' : selected ? ', 선택됨' : ''}${photo.rating ? `, 별점 ${photo.rating}` : ''}${photo.flagged ? ', 플래그' : ''}${edited ? ', 보정됨' : ''}`}
+    aria-pressed={selected || active} data-active={active} data-selected={selected} data-photo-path={photo.filePath}
+    className={`lx-thumbnail ${className}`}>
+    <span className="lx-thumbnail-image">
+      {photo.thumbUrl ? <img src={photo.thumbUrl} alt="" loading="lazy" decoding="async" /> : <span className="text-[12px] text-faint">미리보기 대기</span>}
+      {selected && !active && <span className="lx-selection-check" aria-hidden="true">✓</span>}
+    </span>
+    {showName && <span className="lx-thumbnail-name">{photo.fileName}</span>}
+    <span className="lx-thumbnail-meta"><span>{photo.isRaw ? 'RAW' : photo.ext.slice(1).toUpperCase()}</span><span>{photo.rating ? '★'.repeat(photo.rating) : ''}{photo.flagged ? ' ⚑' : ''}{edited ? ' ◆' : ''}</span></span>
+  </button>
 }

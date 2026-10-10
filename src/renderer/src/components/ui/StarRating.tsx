@@ -15,7 +15,7 @@ export function StarRating({
   onChange
 }: StarRatingProps): JSX.Element {
   return (
-    <div className="flex items-center gap-0.5" role={interactive ? 'radiogroup' : undefined}>
+    <div className="flex items-center gap-0.5" role={interactive ? 'group' : undefined} aria-label="별점">
       {[1, 2, 3, 4, 5].map((n) => {
         const filled = n <= rating
         const star = (
@@ -34,11 +34,10 @@ export function StarRating({
           <button
             key={n}
             type="button"
-            role="radio"
-            aria-checked={n === rating}
-            aria-label={`${n} star${n > 1 ? 's' : ''}`}
+            aria-pressed={n === rating}
+            aria-label={`별점 ${n}${n === rating ? ', 다시 누르면 해제' : ''}`}
             onClick={() => onChange?.(n === rating ? 0 : n)}
-            className="transition-transform hover:scale-110"
+            className="p-0.5"
           >
             {star}
           </button>

@@ -10,8 +10,12 @@ import { MasksPanel } from '../ui/MasksPanel'
 import { PresetsPanel } from '../ui/PresetsPanel'
 import { HistoryPanel } from '../ui/HistoryPanel'
 import { ResizeHandle } from '../ui/ResizeHandle'
-import { autoEnhance, computeAutoEnhance } from '../../lib/autoEnhance'
-import type { EditState } from '../../types'
+import { computeAutoEnhance } from '../../lib/autoEnhance'
+import { defaultEditState, type EditState } from '../../types'
+import { ModeSwitch } from '../ui/ModeSwitch'
+import { CropBar } from '../ui/CropBar'
+import { useWorkspaceStore } from '../../store/useWorkspaceStore'
+import { historyShortcuts, isMac, runEditHistory } from '../../lib/editShortcuts'
 
 // RIGHT edit panel. Simple mode: Auto Enhance + 4 large controls. Expert mode:
 // the full develop stack in collapsible sections, all driving the WebGL preview.
@@ -21,22 +25,26 @@ export function EditPanel(): JSX.Element {
   const edit = useStore((s) => s.edit)
   const setEdit = useStore((s) => s.setEdit)
   const resetEdit = useStore((s) => s.resetEdit)
-  const undo = useStore((s) => s.undo)
-  const redo = useStore((s) => s.redo)
   const canUndo = useStore((s) => s.undoStack.length > 0)
   const canRedo = useStore((s) => s.redoStack.length > 0)
+  const syncing = useStore((s) => s.syncing)
+  const previewing = useStore((s) => !!s.previewEdit)
   const maskMode = useStore((s) => s.maskMode)
   const setMaskMode = useStore((s) => s.setMaskMode)
-  const panelWidth = useStore((s) => s.panelWidth)
+  const editLoading = useStore((s) => s.editLoading)
+  const cropMode = useStore((s) => s.cropMode)
+  const photoMeta = useStore((s) => s.photos.find((p) => p.filePath === s.selectedPath)?.meta)
+  const tab = useWorkspaceStore((s) => s.editPanelTab)
+  const setTab = useWorkspaceStore((s) => s.setEditPanelTab)
   const setPanelWidth = useStore((s) => s.setPanelWidth)
 
   const set = (key: keyof EditState) => (v: number) => setEdit({ [key]: v })
-  const title = maskMode ? 'Masking' : mode === 'simple' ? 'Adjust' : 'Develop'
+  const title = maskMode ? '부분 보정' : cropMode ? '자르기·수평' : '사진 보정'
+  const historyDisabled = !hasPhoto || editLoading || syncing || previewing
 
   return (
     <aside
-      className="lx-glass lx-fade-in absolute bottom-0 right-0 top-12 z-20 flex flex-col rounded-none border-y-0 border-r-0"
-      style={{ width: panelWidth, animationDelay: '90ms' }}
+      className="lx-edit-panel" aria-label="사진 보정 도구"
     >
       <ResizeHandle
         side="left"
@@ -45,52 +53,37 @@ export function EditPanel(): JSX.Element {
       />
       <div className="flex items-center justify-between px-4 pt-3">
         <span className="lx-display text-[13px] font-semibold text-ink">{title}</span>
-        <div className="flex items-center gap-1">
-          {maskMode ? (
-            <button
-              onClick={() => setMaskMode(false)}
-              className="rounded-control border border-accent/60 bg-accent/10 px-3 py-1 text-[11px] font-medium text-accent-soft transition-colors hover:bg-accent/[0.16]"
-            >
-              Done
-            </button>
-          ) : (
-            <>
-              <HeaderIconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={undo}>
-                <path d="M4 7h6.5a3.5 3.5 0 0 1 0 7H6" />
-                <path d="M6.5 4.5L4 7l2.5 2.5" />
-              </HeaderIconButton>
-              <HeaderIconButton label="Redo (⇧⌘Z)" disabled={!canRedo} onClick={redo}>
-                <path d="M14 7H7.5a3.5 3.5 0 0 0 0 7H12" />
-                <path d="M11.5 4.5L14 7l-2.5 2.5" />
-              </HeaderIconButton>
-              <span className="mx-0.5 h-3.5 w-px bg-white/10" />
-              <button
-                onClick={resetEdit}
-                disabled={!hasPhoto}
-                className="text-[11px] text-muted transition-colors hover:text-accent-soft disabled:opacity-40"
-              >
-                Reset
-              </button>
-            </>
-          )}
+        <div className="flex items-center gap-3">
+          {maskMode ? <button className="text-[12px] text-accent" onClick={() => setMaskMode(false)}>부분 보정 완료</button>
+            : <button onClick={resetEdit} disabled={historyDisabled} className="text-[12px] text-muted hover:text-ink disabled:opacity-40">보정 초기화</button>}
+          <button aria-label="보정 도구 접기" title="보정 도구 접기" onClick={() => useWorkspaceStore.getState().togglePanel()} className="text-muted px-1">›</button>
         </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 px-3 pt-3 pb-1">
+        {(['undo', 'redo'] as const).map((action) => <button key={action} type="button"
+          aria-label={action === 'undo' ? '실행 취소' : '다시 실행'}
+          aria-keyshortcuts={`${isMac ? 'Meta' : 'Control'}+${action === 'redo' ? 'Shift+' : ''}Z`}
+          title={`${action === 'undo' ? '마지막 보정 실행 취소' : '취소한 보정 다시 실행'} (${historyShortcuts[action]})`}
+          disabled={historyDisabled || !(action === 'undo' ? canUndo : canRedo)} onClick={() => runEditHistory(action)}
+          className="flex items-center justify-between gap-2 rounded-control border border-glass px-2 py-2 text-[12px] text-ink disabled:opacity-35">
+          <span>{action === 'undo' ? '↶ 실행 취소' : '↷ 다시 실행'}</span><kbd className="text-muted">{historyShortcuts[action]}</kbd>
+        </button>)}
       </div>
       <div className="lx-rule mx-4 mt-2" />
 
       {!hasPhoto ? (
         <p className="p-8 text-center text-[12px] leading-relaxed text-faint">
-          Select a photo to begin editing.
+          사진을 선택해 보정을 시작하세요.
         </p>
-      ) : maskMode ? (
-        <div key="mask" className="lx-fade-in min-h-0 flex-1 overflow-y-auto p-3">
-          <MasksPanel />
-        </div>
       ) : (
-        <div key="develop" className="lx-fade-in min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-          <Histogram />
-          {mode === 'expert' && <ToolStrip />}
-          {mode === 'simple' ? <SimpleControls /> : <ExpertControls set={set} edit={edit} />}
-        </div>
+        <fieldset disabled={editLoading || syncing} className="min-w-0 min-h-0 flex-1 overflow-y-auto p-3">{editLoading && <p role="status" className="mb-3 text-muted">저장된 보정을 읽는 중…</p>}
+          <details open className="mb-3"><summary className="pb-2 text-[12px] text-muted cursor-pointer">히스토그램</summary><Histogram /></details>
+          <ToolStrip />
+          {cropMode ? <div className="pt-4"><CropBar imgAspect={photoMeta?.width && photoMeta.height ? photoMeta.width / photoMeta.height : 1.5} /></div> : maskMode ? <div className="pt-3"><MasksPanel /></div> : <>
+            <div className="lx-panel-tabs" role="tablist" aria-label="보정 내용">{([['adjust', '직접 조정'], ['presets', '프리셋'], ['history', '편집 기록']] as const).map(([id, label]) => <button role="tab" aria-selected={tab === id} key={id} onClick={() => setTab(id)}>{label}</button>)}</div>
+            {tab === 'adjust' ? <><div className="flex justify-end py-3"><ModeSwitch /></div>{mode === 'simple' ? <SimpleControls /> : <ExpertControls set={set} edit={edit} />}</> : tab === 'presets' ? <PresetsPanel /> : <HistoryPanel />}
+          </>}
+        </fieldset>
       )}
     </aside>
   )
@@ -101,19 +94,20 @@ function ToolStrip(): JSX.Element {
   const setCropMode = useStore((s) => s.setCropMode)
   const setMaskMode = useStore((s) => s.setMaskMode)
   const cropMode = useStore((s) => s.cropMode)
+  const maskMode = useStore((s) => s.maskMode)
   const maskCount = useStore((s) => s.edit.masks.length)
   return (
     <div className="grid grid-cols-2 gap-2">
       <ToolButton
         active={cropMode}
         onClick={() => setCropMode(!cropMode)}
-        label="Crop"
+        label="자르기·수평"
         badge={null}
       >
         <path d="M4.5 1v10.5H15" />
         <path d="M1 4.5h10.5V15" />
       </ToolButton>
-      <ToolButton active={false} onClick={() => setMaskMode(true)} label="Masking" badge={maskCount || null}>
+      <ToolButton active={maskMode} onClick={() => setMaskMode(!maskMode)} label="부분 보정" badge={maskCount || null}>
         <circle cx="6" cy="7" r="4" />
         <circle cx="10.5" cy="9.5" r="4" opacity="0.55" />
       </ToolButton>
@@ -137,7 +131,8 @@ function ToolButton({
   return (
     <button
       onClick={onClick}
-      className={`relative flex items-center justify-center gap-2 rounded-xl border py-2.5 text-[12px] transition-colors ${
+      aria-pressed={active}
+      className={`relative flex items-center justify-center gap-2 rounded-control border py-2.5 text-[12px] transition-colors ${
         active
           ? 'border-accent/60 bg-accent/10 text-accent-soft'
           : 'border-glass bg-white/[0.02] text-muted hover:border-accent/40 hover:text-ink'
@@ -148,7 +143,7 @@ function ToolButton({
       </svg>
       {label}
       {badge != null && (
-        <span className="lx-num absolute right-1.5 top-1.5 rounded-full bg-accent/20 px-1.5 text-[9px] text-accent-soft">
+        <span className="lx-num absolute right-1.5 top-1.5 rounded-full bg-accent/20 px-1.5 text-[12px] text-accent-soft">
           {badge}
         </span>
       )}
@@ -162,36 +157,31 @@ function SimpleControls(): JSX.Element {
   const applyEdit = useStore((s) => s.applyEdit)
   const photo = useStore((s) => s.photos.find((p) => p.filePath === s.selectedPath) ?? null)
   const proxyUrl = useStore((s) => (s.proxy.status === 'ready' ? s.proxy.url : null))
+  const [autoError, setAutoError] = useState<string | null>(null)
   const set = (key: keyof EditState) => (v: number) => setEdit({ [key]: v })
 
   function runAutoEnhance(): void {
-    const meta = photo?.meta ?? null
-    if (proxyUrl) {
-      computeAutoEnhance(proxyUrl, edit, meta).then(applyEdit)
-    } else {
-      applyEdit(autoEnhance(edit, meta))
-    }
+    if (!proxyUrl) return
+    const path = photo?.filePath
+    setAutoError(null)
+    computeAutoEnhance(proxyUrl, edit, photo?.meta ?? null)
+      .then((next) => { if (useStore.getState().selectedPath === path) applyEdit(next) })
+      .catch((error) => { if (useStore.getState().selectedPath === path) setAutoError(error instanceof Error ? error.message : String(error)) })
   }
 
   return (
     <>
-      <Button variant="primary" className="w-full justify-center" onClick={runAutoEnhance}>
-        Auto Enhance
+      <Button variant="primary" className="w-full justify-center" onClick={runAutoEnhance} disabled={!proxyUrl}>
+        밝기 자동 보정
       </Button>
+      {autoError && <p role="alert" className="py-2 text-[12px] text-red-300">{autoError}</p>}
       <div className="space-y-5 pt-1">
-        <Slider label="Brightness" size="lg" value={edit.exposure} onChange={set('exposure')} />
-        <Slider label="Contrast" size="lg" value={edit.contrast} onChange={set('contrast')} />
-        <Slider label="Color" size="lg" value={edit.saturation} onChange={set('saturation')} />
+        <Slider label="노출" size="lg" value={edit.exposure} onChange={set('exposure')} />
+        <Slider label="대비" size="lg" value={edit.contrast} onChange={set('contrast')} />
+        <Slider label="채도" size="lg" value={edit.saturation} onChange={set('saturation')} />
         <DenoiseControl edit={edit} set={set} />
       </div>
-      <div className="space-y-3 pt-1">
-        <div className="flex items-center gap-2">
-          <span className="h-3 w-[2px] rounded-full bg-accent" />
-          <span className="lx-eyebrow">Presets</span>
-          <span className="lx-rule flex-1" />
-        </div>
-        <PresetsPanel />
-      </div>
+
     </>
   )
 }
@@ -205,59 +195,48 @@ function ExpertControls({
 }): JSX.Element {
   return (
     <>
-      <Section title="Light" defaultOpen>
-        <Slider label="Exposure" value={edit.exposure} onChange={set('exposure')} />
-        <Slider label="Contrast" value={edit.contrast} onChange={set('contrast')} />
-        <Slider label="Highlights" value={edit.highlights} onChange={set('highlights')} />
-        <Slider label="Shadows" value={edit.shadows} onChange={set('shadows')} />
-        <Slider label="Whites" value={edit.whites} onChange={set('whites')} />
-        <Slider label="Blacks" value={edit.blacks} onChange={set('blacks')} />
+      <Section title="밝기" defaultOpen>
+        <Slider label="노출" value={edit.exposure} onChange={set('exposure')} />
+        <Slider label="대비" value={edit.contrast} onChange={set('contrast')} />
+        <Slider label="밝은 부분" value={edit.highlights} onChange={set('highlights')} />
+        <Slider label="어두운 부분" value={edit.shadows} onChange={set('shadows')} />
+        <Slider label="흰색" value={edit.whites} onChange={set('whites')} />
+        <Slider label="검은색" value={edit.blacks} onChange={set('blacks')} />
       </Section>
 
-      <Section title="Tone Curve">
+      <Section title="톤 커브">
         <ToneCurve />
       </Section>
 
-      <Section title="Color" defaultOpen>
+      <Section title="색상">
         <WbPicker />
-        <Slider label="Temperature" gradient="temp" value={edit.temperature} onChange={set('temperature')} />
-        <Slider label="Tint" gradient="tint" value={edit.tint} onChange={set('tint')} />
-        <Slider label="Saturation" gradient="sat" value={edit.saturation} onChange={set('saturation')} />
-        <Slider label="Vibrance" value={edit.vibrance} onChange={set('vibrance')} />
+        <Slider label="색온도" gradient="temp" value={edit.temperature} onChange={set('temperature')} />
+        <Slider label="색조" gradient="tint" value={edit.tint} onChange={set('tint')} />
+        <Slider label="채도" gradient="sat" value={edit.saturation} onChange={set('saturation')} />
+        <Slider label="색 생동감" value={edit.vibrance} onChange={set('vibrance')} />
       </Section>
 
-      <Section title="Color Mixer">
+      <Section title="색상별 조정">
         <HslMixer />
       </Section>
 
-      <Section title="Color Grading">
+      <Section title="영역별 색감">
         <ColorGradePanel />
       </Section>
 
-      <Section title="Detail">
-        <Slider label="Texture" value={edit.texture} onChange={set('texture')} />
-        <Slider label="Clarity" value={edit.clarity} onChange={set('clarity')} />
-        <Slider label="Dehaze" value={edit.dehaze} onChange={set('dehaze')} />
-        <Slider label="Sharpening" min={0} max={100} value={edit.sharpening} onChange={set('sharpening')} />
+      <Section title="선명도">
+        <Slider label="질감" value={edit.texture} onChange={set('texture')} />
+        <Slider label="부분 대비" value={edit.clarity} onChange={set('clarity')} />
+        <Slider label="안개 제거" value={edit.dehaze} onChange={set('dehaze')} />
+        <Slider label="선명도" min={0} max={100} value={edit.sharpening} onChange={set('sharpening')} />
         <DenoiseControl edit={edit} set={set} />
       </Section>
 
-      <Section title="Effects">
-        <Slider label="Vignette" value={edit.vignette} onChange={set('vignette')} />
-        <Slider label="Grain" min={0} max={100} value={edit.grain} onChange={set('grain')} />
+      <Section title="효과">
+        <Slider label="가장자리 밝기" value={edit.vignette} onChange={set('vignette')} />
+        <Slider label="필름 입자" min={0} max={100} value={edit.grain} onChange={set('grain')} />
       </Section>
 
-      <Section title="Geometry">
-        <GeometryControls edit={edit} />
-      </Section>
-
-      <Section title="Presets" defaultOpen>
-        <PresetsPanel />
-      </Section>
-
-      <Section title="Snapshots & History">
-        <HistoryPanel />
-      </Section>
     </>
   )
 }
@@ -279,26 +258,32 @@ function DenoiseControl({
 
   return (
     <div className="space-y-2.5">
-      <Slider label="Denoise (AI)" min={0} max={100} value={edit.denoise} onChange={set('denoise')} />
+      <p className="text-[12px] text-muted">NAFNet SIDD로 사진의 노이즈를 줄입니다. 완료된 결과는 이 컴퓨터에 자동 저장됩니다.</p>
+      <Slider label="노이즈 제거 강도" min={0} max={100} value={edit.denoise} onChange={set('denoise')} />
       {running ? (
         <div className="space-y-1.5">
           <div className="h-1 overflow-hidden rounded-full bg-white/10">
             <div className="h-full rounded-full bg-accent transition-[width] duration-200" style={{ width: `${Math.round(dp.progress * 100)}%` }} />
           </div>
-          <p className="lx-num text-center text-[10px] text-muted">Denoising… {Math.round(dp.progress * 100)}%</p>
+          <div className="flex items-center justify-between"><p role="status" className="lx-num text-[12px] text-muted">노이즈 제거 중… {Math.round(dp.progress * 100)}%</p><button className="text-[12px] underline text-muted" onClick={() => useStore.getState().clearDenoise()}>중단</button></div>
         </div>
-      ) : (
+      ) : (!ready || dp.cacheStatus === 'error') ? (
         <button
           onClick={() => void runDenoise()}
-          className="flex w-full items-center justify-center gap-1.5 rounded-control border border-accent/40 bg-accent/[0.06] py-1.5 text-[11px] text-accent-soft transition-colors hover:bg-accent/[0.12]"
+          className="flex w-full items-center justify-center gap-1.5 rounded-control border border-accent/40 bg-accent/[0.06] py-1.5 text-[12px] text-accent-soft transition-colors hover:bg-accent/[0.12]"
         >
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.6 4.2L14 6.4l-3.3 3 .9 4.6L8 11.8 4.4 14l.9-4.6L2 6.4l4.4-1.2z" /></svg>
-          {ready ? 'Re-run denoise' : 'Run AI denoise'}
+          {ready ? '복원 결과 저장 재시도' : '노이즈 제거 (NAFNet SIDD)'}
         </button>
-      )}
-      {dp.status === 'error' && <p className="text-center text-[10px] text-faint">{dp.message}</p>}
+      ) : null}
+      {ready && <>
+        <p role="status" className="text-[12px] text-muted">{dp.cacheStatus === 'stored' ? '복원 결과를 이 컴퓨터에 저장했습니다.' : dp.cacheStatus === 'hit' ? '저장된 복원 결과를 불러왔습니다.' : dp.cacheStatus === 'error' ? `복원은 완료했지만 저장하지 못했습니다. ${dp.cacheMessage ?? ''}` : '복원 미리보기가 준비되었습니다.'}</p>
+        <button className="w-full rounded-control border border-line py-1.5 text-[12px] hover:bg-white/5" onClick={() => useStore.getState().setExportOpen(true)}>결과 이미지 저장…</button>
+        <p className="text-[11px] text-faint">현재 보정을 포함한 JPEG·PNG를 별도 파일로 저장합니다.</p>
+      </>}
+      {dp.status === 'error' && <p className="text-center text-[12px] text-faint">{dp.message}</p>}
       {!ready && !running && edit.denoise > 0 && (
-        <p className="text-center text-[10px] text-faint">Run denoise to apply it.</p>
+        <p className="text-center text-[12px] text-faint">복원을 실행해야 강도가 적용됩니다.</p>
       )}
     </div>
   )
@@ -312,7 +297,7 @@ function WbPicker(): JSX.Element {
   return (
     <button
       onClick={() => setWbPicking(!wbPicking)}
-      className={`flex w-full items-center justify-center gap-2 rounded-control border py-1.5 text-[11px] transition-colors ${
+      className={`flex w-full items-center justify-center gap-2 rounded-control border py-1.5 text-[12px] transition-colors ${
         wbPicking
           ? 'border-accent/60 bg-accent/10 text-accent-soft'
           : 'border-glass text-muted hover:text-ink'
@@ -322,83 +307,7 @@ function WbPicker(): JSX.Element {
         <path d="M10.5 2.5 13.5 5.5M12 4 6.5 9.5 4 12l-1.5.5L3 11l2.5-2.5L11 3" />
         <path d="M2.5 13.5 4 12" />
       </svg>
-      {wbPicking ? 'Click a neutral area…' : 'White balance picker'}
-    </button>
-  )
-}
-
-function HeaderIconButton({
-  label,
-  disabled,
-  onClick,
-  children
-}: {
-  label: string
-  disabled: boolean
-  onClick: () => void
-  children: React.ReactNode
-}): JSX.Element {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={label}
-      aria-label={label}
-      className="rounded-md p-1 text-muted transition-colors hover:bg-white/5 hover:text-ink disabled:pointer-events-none disabled:opacity-30"
-    >
-      <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-        {children}
-      </svg>
-    </button>
-  )
-}
-
-function GeometryControls({ edit }: { edit: EditState }): JSX.Element {
-  const setEdit = useStore((s) => s.setEdit)
-  return (
-    <div className="space-y-3.5">
-      <Slider
-        label="Straighten"
-        min={-45}
-        max={45}
-        value={Math.round(edit.rotate)}
-        onChange={(v) => setEdit({ rotate: v })}
-        onDragChange={(d) => useStore.getState().setStraightening(d)}
-      />
-      <div className="flex gap-2">
-        <GeoButton active={edit.flipH} onClick={() => setEdit({ flipH: !edit.flipH })}>
-          Flip H
-        </GeoButton>
-        <GeoButton active={edit.flipV} onClick={() => setEdit({ flipV: !edit.flipV })}>
-          Flip V
-        </GeoButton>
-        <GeoButton active={false} onClick={() => setEdit({ rotate: 0, flipH: false, flipV: false })}>
-          Reset
-        </GeoButton>
-      </div>
-    </div>
-  )
-}
-
-function GeoButton({
-  active,
-  onClick,
-  children
-}: {
-  active: boolean
-  onClick: () => void
-  children: React.ReactNode
-}): JSX.Element {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex-1 rounded-control border px-2 py-1.5 text-[11px] transition-colors ${
-        active
-          ? 'border-accent/60 bg-accent/10 text-accent-soft'
-          : 'border-glass text-muted hover:text-ink'
-      }`}
-    >
-      {children}
+      {wbPicking ? '사진에서 흰색이나 회색 부분을 클릭하세요' : '흰색 기준으로 색온도 맞추기'}
     </button>
   )
 }
@@ -423,18 +332,17 @@ function Section({
   }, [open])
   return (
     <section
-      className={`overflow-hidden rounded-xl border transition-colors ${
-        open ? 'border-glass bg-white/[0.02]' : 'border-transparent'
-      }`}
+      className="border-b border-glass"
     >
       <button
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
         className="group flex w-full items-center gap-2.5 px-3 py-2.5 text-left"
       >
         <span
           className={`w-[3px] rounded-full bg-accent transition-all ${open ? 'h-4' : 'h-3 opacity-70'}`}
         />
-        <span className="text-[11px] font-semibold uppercase tracking-[0.15em] text-muted transition-colors group-hover:text-ink">
+        <span className="text-[13px] font-medium text-muted transition-colors group-hover:text-ink">
           {title}
         </span>
         <span className="lx-rule flex-1" />
@@ -442,7 +350,7 @@ function Section({
           width="10"
           height="10"
           viewBox="0 0 10 10"
-          className={`text-faint transition-transform duration-300 ${open ? 'rotate-90' : ''}`}
+          className={`text-faint transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
           fill="none"
         >
           <path d="M3.5 2L7 5L3.5 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -450,13 +358,29 @@ function Section({
       </button>
       {/* Smooth collapse: 0fr → 1fr grid rows animates height without a fixed max. */}
       <div
-        className="grid transition-[grid-template-rows] duration-300 ease-out"
+        className="grid transition-[grid-template-rows] duration-150 ease-out"
         style={{ gridTemplateRows: open ? '1fr' : '0fr' }}
       >
-        <div className="overflow-hidden">
-          <div className="space-y-4 px-3 pb-4 pt-0.5">{mounted ? children : null}</div>
+        <div className="overflow-hidden" style={{ visibility: open ? 'visible' : 'hidden' }} aria-hidden={!open}>
+          <div className="space-y-4 px-1 pb-4 pt-0.5">{open && <SectionReset title={title} />}{mounted ? children : null}</div>
         </div>
       </div>
     </section>
   )
+}
+
+function SectionReset({ title }: { title: string }): JSX.Element | null {
+  const keys: Record<string, (keyof EditState)[]> = {
+    '밝기': ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks'],
+    '색상': ['temperature', 'tint', 'saturation', 'vibrance'],
+    '효과': ['vignette', 'grain'], '선명도': ['texture', 'clarity', 'dehaze', 'sharpening', 'denoise'],
+    '톤 커브': ['curves'], '색상별 조정': ['hsl'], '영역별 색감': ['colorGrade']
+  }
+  const fields = keys[title]
+  if (!fields) return null
+  return <button className="text-[12px] text-muted hover:text-ink" onClick={() => {
+    const defaults = defaultEditState()
+    const patch = Object.fromEntries(fields.map((key) => [key, defaults[key]]))
+    useStore.getState().setEdit(patch)
+  }}>{title} 섹션 초기화</button>
 }

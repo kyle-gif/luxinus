@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { DenoiseResult } from '../shared/ai'
 import type { RawDecodeMode, RawDecodeResult } from '../shared/library'
 import type { ExportRenderRequest, ExportRenderResult } from '../shared/export'
 
@@ -12,6 +13,7 @@ export interface DecodeRequest {
 }
 
 const api = {
+  restore: (payload: { id: string; rgba: Uint8Array; width: number; height: number; strength: number }): Promise<DenoiseResult> => ipcRenderer.invoke('decoder:restore', payload),
   onDecode: (cb: (req: DecodeRequest) => void): void => {
     ipcRenderer.on('decoder:request', (_e, req: DecodeRequest) => cb(req))
   },

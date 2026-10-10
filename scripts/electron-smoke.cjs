@@ -1,0 +1,190 @@
+/* Real Electron integration harness. Run only with permission to launch native UI.
+ * Every photo, sidecar, catalog and export lives in a fresh temporary directory. */
+const { app, BrowserWindow, dialog } = require('electron')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const sharp = require('sharp')
+const root = path.resolve(__dirname, '..')
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'luxinus-electron-smoke-')))
+const photos = path.join(scratch, 'photos'), exportsDir = path.join(scratch, 'exports'), userData = path.join(scratch, 'user-data')
+for (const directory of [photos, exportsDir, userData, path.join(userData, 'models')]) fs.mkdirSync(directory, { recursive: true })
+const defaultUserData = app.getPath('userData')
+console.log(JSON.stringify({ defaultUserData, scratchUserData: userData }))
+app.setPath('userData', userData)
+if (fs.existsSync(path.join(root, 'models/nafnet-sidd-width32.onnx'))) fs.symlinkSync(path.join(root, 'models/nafnet-sidd-width32.onnx'), path.join(userData, 'models/nafnet-sidd-width32.onnx'))
+const artifacts = path.join(root, '.omc/artifacts')
+fs.mkdirSync(artifacts, { recursive: true })
+const fixtureReady = (async () => {
+  const svg = Buffer.from('<svg width="640" height="400"><rect width="640" height="400" fill="#607d8b"/><circle cx="410" cy="140" r="76" fill="#e5ba87"/><path d="M0 400L0 260L190 130L340 400Z" fill="#264d3c"/></svg>')
+  await sharp(svg).jpeg().toFile(path.join(photos, '01-가로-사진.jpg'))
+  await sharp(svg).rotate(90).png().toFile(path.join(photos, '02-세로-사진.png'))
+  await sharp(svg).withMetadata({ orientation: 6 }).jpeg().toFile(path.join(photos, '03-EXIF회전-긴한국어파일이름-사진.jpg'))
+})()
+let picker = photos
+// Replace the OS picker in this harness only; scans/IPC/preload remain real.
+dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [picker] })
+let lastCode = null
+let activeWindow = null
+const issues = []
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('console-message', (_e, level, message) => { if (level >= 3) issues.push(message) })
+  contents.on('render-process-gone', (_e, details) => issues.push(`renderer exited: ${details.reason}`))
+})
+require(path.join(root, 'out/main/index.js'))
+const hash = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+async function run() {
+  await app.whenReady(); await fixtureReady
+  let win
+  for (let i = 0; i < 100; i++) { win = BrowserWindow.getAllWindows().find((w) => w.isVisible()); if (win) break; await sleep(100) }
+  if (!win) throw new Error('No visible Electron window')
+  activeWindow = win
+  const js = async (code) => {
+    lastCode = code
+    const result = await win.webContents.executeJavaScript(`(async()=>{try{return {ok:true,value:await (${code})}}catch(error){return {ok:false,message:String(error),stack:error?.stack}}})()`)
+    if (!result.ok) throw new Error(`Renderer evaluation failed: ${result.message}\n${result.stack}\nExpression: ${code}`)
+    return result.value
+  }
+  async function wait(code) { for (let i = 0; i < 120; i++) { if (await js(code)) return; await sleep(100) } throw new Error(`UI condition timed out: ${code}`) }
+  const click = async (label) => js(`(()=>{const el=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${JSON.stringify(label)});if(!el)throw Error('Missing button');el.click()})()`)
+  await wait('!!window.luxinus && !!document.querySelector(".lx-topbar")')
+  await js(`(()=>{document.querySelector('[aria-label="AI 채팅 닫기"]')?.click()})()`)
+  const originals = Object.fromEntries(fs.readdirSync(photos).map((name) => [name, hash(path.join(photos, name))]))
+  await win.webContents.capturePage().then((image) => fs.writeFileSync(path.join(artifacts, 'electron-empty-1440.png'), image.toPNG()))
+  await click('폴더 열기')
+  await wait('document.querySelectorAll(".lx-thumbnail-image img").length===3')
+  const thumbnailsContain = await js(`[...document.querySelectorAll('.lx-thumbnail-image img')].every(image => getComputedStyle(image).objectFit === 'contain')`)
+  if (!thumbnailsContain) throw new Error('Thumbnails crop the source composition')
+  await win.webContents.capturePage().then((image) => fs.writeFileSync(path.join(artifacts, 'electron-library-1440.png'), image.toPNG()))
+  await click('사진 편집')
+  await wait('!!document.querySelector(".lx-stage canvas") && !!document.querySelector("[role=slider][aria-label=노출]")')
+  await js(`document.querySelector('[role=slider][aria-label=노출]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))`)
+  await sleep(700)
+  const files = fs.readdirSync(photos).filter((name) => name.endsWith('.lux.json'))
+  if (files.length !== 1) throw new Error('Slider did not persist one sidecar')
+  const sidecar = JSON.parse(fs.readFileSync(path.join(photos, files[0])))
+  if (sidecar.edits.exposure !== 1) throw new Error('Wrong saved exposure')
+  const historyKey = async (target, modifiers = { metaKey: true }) => js(`(()=>{const target=${target};target.focus?.();const event=new KeyboardEvent('keydown',{key:'z',bubbles:true,cancelable:true,...${JSON.stringify(modifiers)}});target.dispatchEvent(event);return event.defaultPrevented})()`)
+  const exposureIs = (value) => `document.querySelector('[role=slider][aria-label=노출]')?.getAttribute('aria-valuenow') === '${value}'`
+  // The same shortcut works from slider and button focus, in both workspaces.
+  await historyKey(`document.querySelector('[role=slider][aria-label=노출]')`)
+  await wait(exposureIs(0))
+  await historyKey(`document.querySelector('[role=slider][aria-label=노출]')`, { ctrlKey: true, shiftKey: true })
+  await wait(exposureIs(1))
+  await historyKey(`document.querySelector('button[aria-label="실행 취소"]')`)
+  await wait(exposureIs(0))
+  await js(`document.querySelector('button[aria-label="다시 실행"]').click()`)
+  await wait(exposureIs(1))
+  // A number editor keeps native text undo and does not change photo history.
+  await js(`document.querySelector('button[aria-label^="노출 "][aria-label$="직접 입력"]').click()`)
+  await wait(`!!document.querySelector('input[aria-label="노출 직접 입력"]')`)
+  const textUndoCaptured = await historyKey(`document.querySelector('input[aria-label="노출 직접 입력"]')`)
+  if (textUndoCaptured) throw new Error('Photo undo intercepted native text undo')
+  await js(`document.querySelector('input[aria-label="노출 직접 입력"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`)
+  await wait(exposureIs(1))
+  await click('사진 목록')
+  await historyKey('document.body', { ctrlKey: true })
+  await click('사진 편집'); await wait(exposureIs(0))
+  await historyKey('document.body', { ctrlKey: true, shiftKey: true }); await wait(exposureIs(1))
+  await win.webContents.capturePage().then((image) => fs.writeFileSync(path.join(artifacts, 'electron-develop-1440.png'), image.toPNG()))
+  win.setSize(1024, 768); await sleep(250)
+  const layout = await js(`({viewport:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth,panel:document.querySelector('.lx-edit-panel').getBoundingClientRect().toJSON()})`)
+  if (layout.overflow || layout.panel.right > 1025) throw new Error('Layout overflow at 1024px')
+  await win.webContents.capturePage().then((image) => fs.writeFileSync(path.join(artifacts, 'electron-develop-1024.png'), image.toPNG()))
+  await click('자르기·수평')
+  await wait(`!!document.querySelector('[aria-label="자르기와 수평 조정"]')`)
+  if (await js(`[...document.querySelectorAll('.lx-edit-panel button')].some(x=>x.textContent.trim()==='기하')`)) throw new Error('Geometry remains a separate section')
+  await js(`document.querySelector('[role=slider][aria-label="수평 맞추기"]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))`)
+  await sleep(700)
+  await click('좌우 뒤집기'); await sleep(700)
+  await historyKey(`[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='좌우 뒤집기')`)
+  await wait(`[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='좌우 뒤집기').getAttribute('aria-pressed')==='false'`)
+  const angle = await js(`document.querySelector('[role=slider][aria-label="수평 맞추기"]').getAttribute('aria-valuenow')`)
+  if (angle !== '0.1') throw new Error('Undo lost the preceding straighten adjustment')
+  await historyKey('document.body', { ctrlKey: true, shiftKey: true })
+  await wait(`[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='좌우 뒤집기').getAttribute('aria-pressed')==='true'`)
+  // Real pointer capture, including a pause longer than the history debounce.
+  // Keyboard Undo must wait for pointer-up, then undo the complete crop once.
+  const handle = await js(`(()=>{const r=document.querySelector('.lx-stage [style*="nwse-resize"]').getBoundingClientRect();return{x:Math.round(r.x+r.width/2+2),y:Math.round(r.y+r.height/2+2)}})()`)
+  win.focus()
+  win.webContents.sendInputEvent({ type: 'mouseMove', ...handle })
+  win.webContents.sendInputEvent({ type: 'mouseDown', ...handle, button: 'left', clickCount: 1 })
+  win.webContents.sendInputEvent({ type: 'mouseMove', x: handle.x + 36, y: handle.y + 28, modifiers: ['leftButtonDown'] })
+  await sleep(550)
+  if (await historyKey('document.body')) throw new Error('Photo undo interrupted an active crop drag')
+  win.webContents.sendInputEvent({ type: 'mouseMove', x: handle.x + 68, y: handle.y + 46, modifiers: ['leftButtonDown'] })
+  await sleep(100)
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: handle.x + 68, y: handle.y + 46, button: 'left', clickCount: 1 })
+  await sleep(700)
+  const draggedCrop = JSON.parse(fs.readFileSync(path.join(photos, files[0]))).edits.crop
+  if (!draggedCrop || draggedCrop.w >= 1 || draggedCrop.h >= 1) throw new Error('Actual pointer crop did not change the frame')
+  if (!(await historyKey('document.body'))) throw new Error('Photo undo stayed blocked after crop pointer-up')
+  await sleep(700)
+  const undoneCrop = JSON.parse(fs.readFileSync(path.join(photos, files[0]))).edits
+  if (undoneCrop.crop !== null || undoneCrop.rotate !== 0.1 || !undoneCrop.flipH) throw new Error('One undo did not restore the complete pre-drag crop state')
+  await historyKey('document.body', { metaKey: true, shiftKey: true }); await sleep(700)
+  if (JSON.stringify(JSON.parse(fs.readFileSync(path.join(photos, files[0]))).edits.crop) !== JSON.stringify(draggedCrop)) throw new Error('Crop redo did not restore the pointer result')
+  await win.webContents.capturePage().then(image=>fs.writeFileSync(path.join(artifacts,'electron-crop-1024.png'),image.toPNG()))
+  await click('자르기·수평·뒤집기 초기화'); await sleep(700)
+  const resetGeometry = JSON.parse(fs.readFileSync(path.join(photos, files[0]))).edits
+  if (resetGeometry.rotate !== 0 || resetGeometry.flipH || resetGeometry.flipV || resetGeometry.crop !== null) throw new Error('Geometry reset was incomplete')
+  await click('자르기 완료')
+  await click('내보내기'); await wait(`!!document.querySelector('[role="dialog"][aria-label="사진 내보내기"]')`)
+  await historyKey('document.body')
+  await sleep(600)
+  if (JSON.parse(fs.readFileSync(path.join(photos, files[0]))).edits.rotate !== 0) throw new Error('Photo history changed behind an open modal')
+  await js(`document.querySelector('button[aria-label="내보내기 닫기"]').click()`)
+  await click('사진만 보기')
+  await wait('!document.querySelector(".lx-edit-panel") && !document.querySelector(".lx-stage-toolbar")')
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`)
+  await wait('!!document.querySelector(".lx-topbar")')
+  picker = exportsDir
+  const exportResult = await js(`(async()=>{const folder=await window.luxinus.library.openFolder().catch(()=>null);return folder})()`)
+  if (!exportResult || exportResult.photos.length !== 0) throw new Error('Empty folder did not scan correctly')
+  // Restore photo scope by re-opening through UI.
+  picker = photos
+  await click('사진 목록'); await click('폴더 열기'); await wait('document.querySelectorAll(".lx-thumbnail-image img").length===3')
+  picker = exportsDir
+  await click('내보내기')
+  await wait(`!!document.querySelector('[role="dialog"][aria-label="사진 내보내기"]')`)
+  const modalFocus = await js(`(()=>{const dialog=document.querySelector('[role="dialog"][aria-label="사진 내보내기"]');return dialog.contains(document.activeElement)})()`)
+  if (!modalFocus) throw new Error('Export modal did not receive keyboard focus')
+  await click('PNG'); await click('폴더 선택…')
+  await wait(`[...document.querySelectorAll('[role="dialog"] button')].some(button => button.textContent.trim() === 'PNG' && button.getAttribute('aria-pressed') === 'true') && [...document.querySelectorAll('[role="dialog"] button')].some(button => button.textContent.trim() === '1장 내보내기' && !button.disabled)`)
+  await sleep(180)
+  const exportLayout = await js(`(()=>{const modal=document.querySelector('[role="dialog"][aria-label="사진 내보내기"]');const options=modal.querySelector('fieldset');const tiff=[...modal.querySelectorAll('button')].find(x=>x.textContent.trim()==='TIFF');return {overflow: options.scrollWidth > options.clientWidth,tiffRight:tiff.getBoundingClientRect().right,modalRight:modal.getBoundingClientRect().right}})()`)
+  if (exportLayout.overflow || exportLayout.tiffRight > exportLayout.modalRight) throw new Error('Export options overflow after picking long destination')
+  await win.webContents.capturePage().then((image) => fs.writeFileSync(path.join(artifacts, 'electron-export-dialog-1024.png'), image.toPNG()))
+  const focusLoop = await js(`(()=>{const dialog=document.querySelector('[role="dialog"][aria-label="사진 내보내기"]');const list=[...dialog.querySelectorAll('button,input,select,textarea,[tabindex="0"]')].filter(x=>!x.matches(':disabled')&&x.getClientRects().length);const last=list[list.length-1];last.focus();last.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true}));return document.activeElement===list[0]})()`)
+  if (!focusLoop) throw new Error('Export dialog focus escaped')
+  await click('1장 내보내기')
+  await wait(`document.querySelector('[role="dialog"]')?.textContent.includes("1장 저장")`)
+  const uiExportPath = path.join(exportsDir, '01-가로-사진.png')
+  const uiExport = await sharp(uiExportPath).metadata()
+  if (uiExport.format !== 'png' || uiExport.width !== 640 || uiExport.height !== 400) throw new Error('UI export produced wrong file')
+  await click('닫기')
+  const result = await js(`(async()=>{const destDir=await window.luxinus.exportr.pickDir();return window.luxinus.exportr.run([{filePath:${JSON.stringify(path.join(photos, '01-가로-사진.jpg'))},fileName:'01-가로-사진.jpg',editState:null,meta:null}],{format:'png',quality:90,longEdge:320,filenamePattern:'test',exifMode:'strip',frameStyle:'minimal',destDir})})()`)
+  if (result.written.length !== 1 || result.errors.length) throw new Error(`Export failed: ${JSON.stringify(result)}`)
+  const output = await sharp(result.written[0]).metadata()
+  if (output.width !== 320 || output.height !== 200 || output.format !== 'png') throw new Error('Wrong export format/size')
+  for (const [name, expected] of Object.entries(originals)) if (hash(path.join(photos, name)) !== expected) throw new Error('Original changed')
+  const modelStatus = await js('window.luxinus.localAgent.status()')
+  const report = { defaultUserData, scratch, screenshots: true, globalHistoryShortcuts: true, nativeTextUndoPreserved: !textUndoCaptured, cropStraightenFlipUndo: true, realPointerCropOneUndoAfterPause: true, historyBlockedDuringPointerDrag: true, modalHistoryBlocked: true, realPreloadIPC: true, realSharpSQLiteScan: true, thumbnailsContain, exportModalFocus: modalFocus && focusLoop, exportLayout, uiExport: { format: uiExport.format, width: uiExport.width, height: uiExport.height }, sidecarExposure: 1, originalHashesUnchanged: true, export: output, layout, localLanguageModel: modelStatus.phase, errors: issues, emptyFolder: !!exportResult }
+  fs.writeFileSync(path.join(artifacts, 'electron-smoke.json'), JSON.stringify(report, null, 2))
+  console.log(JSON.stringify(report))
+  fs.rmSync(path.join(artifacts, 'electron-smoke-error.txt'), { force: true })
+  if (issues.some((m) => /Uncaught|shader|Failed to load/.test(m))) throw new Error('Renderer error found')
+  app.quit()
+  setTimeout(() => app.exit(0), 2000)
+}
+run().catch(async (error) => {
+  const report = { error: String(error), stack: error?.stack, lastCode, issues, scratch, defaultUserData }
+  console.error(JSON.stringify(report, null, 2))
+  fs.writeFileSync(path.join(artifacts, 'electron-smoke-error.txt'), JSON.stringify(report, null, 2))
+  if (activeWindow && !activeWindow.isDestroyed()) {
+    await activeWindow.webContents.capturePage().then((image) => fs.writeFileSync(path.join(artifacts, 'electron-failure.png'), image.toPNG())).catch(() => {})
+  }
+  app.exit(1)
+})

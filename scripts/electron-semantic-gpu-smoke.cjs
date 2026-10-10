@@ -1,0 +1,18 @@
+// Real GPU shader verification using synthetic coverage only. No model/network.
+const { app, BrowserWindow } = require('electron')
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os')
+const root = path.resolve(__dirname, '..'), artifacts = path.join(root, '.omc/artifacts')
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'luxinus-semantic-gpu-')))
+app.setPath('userData', scratch)
+fs.mkdirSync(artifacts, { recursive: true })
+require('esbuild').buildSync({ entryPoints: [path.join(root, 'scripts/semantic-gpu-probe.ts')], outfile: path.join(scratch, 'probe.js'), bundle: true, platform: 'browser', format: 'iife' })
+const timer = setTimeout(() => app.exit(1), 45000)
+app.whenReady().then(async () => {
+  const win = new BrowserWindow({ width: 700, height: 500, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } })
+  win.webContents.setBackgroundThrottling(false)
+  await win.loadURL('data:text/html,<html><body>Luxinus synthetic semantic GPU verification</body></html>')
+  await win.webContents.executeJavaScript(fs.readFileSync(path.join(scratch, 'probe.js'), 'utf8'))
+  const report = await win.webContents.executeJavaScript('window.runSemanticProbe()')
+  fs.writeFileSync(path.join(artifacts, 'electron-semantic-gpu-smoke.json'), JSON.stringify({ ...report, at: new Date().toISOString(), scratch }, null, 2))
+  console.log(JSON.stringify(report)); clearTimeout(timer); app.exit(0)
+}).catch(error => { console.error(error); clearTimeout(timer); app.exit(1) })

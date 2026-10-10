@@ -4,7 +4,8 @@
 
 // v2: masks gained combinable `refine` components (add/subtract/intersect).
 // v1 sidecars load unchanged — coerceEditState fills `refine: []`.
-export const EDIT_SCHEMA_VERSION = 2
+export const EDIT_SCHEMA_VERSION = 3
+import type { SemanticGeom } from './portrait'
 
 // A single tone-curve control point in 0..1 space (input → output).
 export interface CurvePoint {
@@ -108,7 +109,7 @@ export type ColorGradeRegionKey = (typeof COLOR_GRADE_REGIONS)[number]
 // space — the same space the mask overlays draw in — applied by the shader as a
 // compositing pass over the globally-developed image.
 
-export type MaskKind = 'radial' | 'linear' | 'brush' | 'lumRange' | 'colorRange'
+export type MaskKind = 'radial' | 'linear' | 'brush' | 'lumRange' | 'colorRange' | 'semantic'
 
 // The local adjustments a mask can carry (a focused subset of EditState).
 export interface MaskAdjust {
@@ -220,6 +221,8 @@ export interface Mask {
   brush?: BrushGeom
   lum?: LumRangeGeom
   color?: ColorRangeGeom
+  /** Persisted full-source coverage, independent of view crop/rotation. */
+  semantic?: SemanticGeom
   /** Combinable refinements applied to the primary shape (v2+). */
   refine?: MaskRefine[]
 }

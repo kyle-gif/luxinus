@@ -1,4 +1,5 @@
-import { useId, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent } from 'react'
+import { useEditGesture } from '../../lib/useEditGesture'
+import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent } from 'react'
 
 // Named gradient tracks for colour controls — the track itself communicates what
 // the slider does (Lightroom-style), which is far more legible than a bare groove.
@@ -43,6 +44,19 @@ export function Slider({
   const id = useId()
   const trackRef = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState(false)
+  const gesture = useEditGesture()
+  const dragCallback = useRef(onDragChange)
+  dragCallback.current = onDragChange
+  useEffect(() => () => dragCallback.current?.(false), [])
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const fineRef = useRef({ x: 0, value: 0 })
+  const disabled = (): boolean => !!trackRef.current?.closest('fieldset[disabled], [aria-disabled="true"]')
+  function commitDraft(): void {
+    const number = Number(draft)
+    if (!disabled() && draft.trim() && Number.isFinite(number)) onChange(clamp(Math.round(number / step) * step, min, max))
+    setEditing(false)
+  }
 
   const pct = ((value - min) / (max - min)) * 100
   // Bipolar sliders fill from the center; unipolar from the left.
@@ -62,24 +76,33 @@ export function Slider({
   }
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>): void {
+    if (disabled() || !gesture.begin()) return
     e.currentTarget.setPointerCapture(e.pointerId)
     setDragging(true)
+    fineRef.current = { x: e.clientX, value }
     onDragChange?.(true)
-    onChange(valueFromClientX(e.clientX))
+    if (!e.shiftKey) onChange(valueFromClientX(e.clientX))
   }
   function onPointerMove(e: ReactPointerEvent<HTMLDivElement>): void {
-    if (dragging) onChange(valueFromClientX(e.clientX))
+    if (dragging && gesture.isActive() && !disabled()) {
+      const width = trackRef.current?.getBoundingClientRect().width ?? 1
+      const fine = fineRef.current.value + (e.clientX - fineRef.current.x) / width * (max - min) / 10
+      onChange(e.shiftKey ? clamp(Math.round(fine / step) * step, min, max) : valueFromClientX(e.clientX))
+    }
   }
   function onPointerUp(e: ReactPointerEvent<HTMLDivElement>): void {
     setDragging(false)
+    gesture.end()
     onDragChange?.(false)
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
   }
   function onDoubleClick(): void {
+    if (disabled()) return
     // Double-click resets to the neutral origin — a standard develop affordance.
     onChange(min < 0 ? 0 : min)
   }
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>): void {
+    if (disabled()) return
     let next = value
     if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = value - step
     else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = value + step
@@ -89,6 +112,7 @@ export function Slider({
     else if (e.key === 'End') next = max
     else return
     e.preventDefault()
+    e.stopPropagation()
     onChange(clamp(next, min, max))
   }
 
@@ -99,17 +123,14 @@ export function Slider({
       <div className="mb-1.5 flex items-baseline justify-between">
         <label
           htmlFor={id}
-          className={big ? 'text-[13px] text-ink' : 'text-[11.5px] font-medium tracking-wide text-muted'}
+          className={big ? 'text-[13px] text-ink' : 'text-[13px] text-muted'}
         >
           {label}
         </label>
-        <span
-          className={`lx-num tabular-nums transition-colors ${big ? 'text-[13px]' : 'text-[11px]'} ${
-            active ? 'text-accent-soft' : 'text-faint'
-          }`}
-        >
-          {disp}
-        </span>
+        <div className="flex items-center gap-2">
+          {active && <button type="button" title={`${label} 초기화`} aria-label={`${label} 초기화`} onClick={onDoubleClick} className="text-[12px] text-muted">↺</button>}
+          {editing ? <input autoFocus type="number" aria-label={`${label} 직접 입력`} min={min} max={max} step={step} value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={commitDraft} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commitDraft(); if (e.key === 'Escape') { e.preventDefault(); setEditing(false) } }} className="lx-num w-[72px] text-right text-[12px]" /> : <button type="button" title="클릭해서 수치 입력 · Shift 드래그로 미세 조절" aria-label={`${label} ${disp}, 직접 입력`} onClick={() => { setDraft(String(value)); setEditing(true) }} className={`lx-num min-w-[48px] text-right text-[12px] ${active ? 'text-ink' : 'text-muted'}`}>{disp}</button>}
+        </div>
       </div>
 
       <div
@@ -126,6 +147,7 @@ export function Slider({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onLostPointerCapture={onPointerUp}
         onDoubleClick={onDoubleClick}
         onKeyDown={onKeyDown}
         className="lx-slider group relative flex cursor-pointer touch-none items-center"

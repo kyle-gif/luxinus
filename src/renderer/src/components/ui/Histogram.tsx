@@ -89,7 +89,7 @@ export function Histogram(): JSX.Element {
       {/* clipping indicators — shadows (top-left) / highlights (top-right).
           Click either (or press J) to toggle the stage zebra overlays. */}
       <button
-        title="Shadow clipping — click to toggle zebras (J)"
+        title="검정 클리핑 표시 켜기 / 끄기 (J)"
         onClick={() => useStore.getState().setShowClipping(!useStore.getState().showClipping)}
         className="absolute left-0 top-0 flex h-6 w-6 items-start justify-start p-1.5"
       >
@@ -99,7 +99,7 @@ export function Histogram(): JSX.Element {
         />
       </button>
       <button
-        title="Highlight clipping — click to toggle zebras (J)"
+        title="흰색 클리핑 표시 켜기 / 끄기 (J)"
         onClick={() => useStore.getState().setShowClipping(!useStore.getState().showClipping)}
         className="absolute right-0 top-0 flex h-6 w-6 items-start justify-end p-1.5"
       >
@@ -109,8 +109,8 @@ export function Histogram(): JSX.Element {
         />
       </button>
       {!hist && (
-        <span className="lx-num absolute inset-0 flex items-center justify-center text-[9px] text-faint">
-          waiting for image…
+        <span className="lx-num absolute inset-0 flex items-center justify-center text-[12px] text-faint">
+          사진을 기다리는 중…
         </span>
       )}
     </div>

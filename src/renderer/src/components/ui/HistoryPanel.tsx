@@ -9,26 +9,26 @@ import type { EditState } from '../../types'
 // Name the change between two edit states for the history label — the single
 // field that moved, or a category, so the timeline reads like Lightroom's.
 const SCALAR_LABELS: [keyof EditState, string][] = [
-  ['exposure', 'Exposure'], ['contrast', 'Contrast'], ['highlights', 'Highlights'],
-  ['shadows', 'Shadows'], ['whites', 'Whites'], ['blacks', 'Blacks'],
-  ['temperature', 'Temperature'], ['tint', 'Tint'], ['saturation', 'Saturation'],
-  ['vibrance', 'Vibrance'], ['clarity', 'Clarity'], ['texture', 'Texture'],
-  ['sharpening', 'Sharpening'], ['denoise', 'Denoise'], ['dehaze', 'Dehaze'],
-  ['vignette', 'Vignette'], ['grain', 'Grain'], ['rotate', 'Straighten']
+  ['exposure', '노출'], ['contrast', '대비'], ['highlights', '밝은 부분'],
+  ['shadows', '어두운 부분'], ['whites', '흰색'], ['blacks', '검은색'],
+  ['temperature', '색온도'], ['tint', '색조'], ['saturation', '채도'],
+  ['vibrance', '색 생동감'], ['clarity', '부분 대비'], ['texture', '질감'],
+  ['sharpening', '선명도'], ['denoise', 'RGB 흐림 복원'], ['dehaze', '안개 제거'],
+  ['vignette', '가장자리 밝기'], ['grain', '필름 입자'], ['rotate', '수평 맞추기']
 ]
 
 function describeDelta(prev: EditState | null, cur: EditState): string {
-  if (!prev) return 'Import'
+  if (!prev) return '불러오기'
   const changed: string[] = []
   for (const [key, label] of SCALAR_LABELS) {
     if (prev[key] !== cur[key]) changed.push(label)
   }
-  if (JSON.stringify(prev.curves) !== JSON.stringify(cur.curves)) changed.push('Tone curve')
-  if (JSON.stringify(prev.hsl) !== JSON.stringify(cur.hsl)) changed.push('Color mixer')
-  if (JSON.stringify(prev.colorGrade) !== JSON.stringify(cur.colorGrade)) changed.push('Color grade')
-  if (JSON.stringify(prev.masks) !== JSON.stringify(cur.masks)) changed.push('Masks')
-  if (prev.crop !== cur.crop || prev.flipH !== cur.flipH || prev.flipV !== cur.flipV) changed.push('Crop')
-  if (changed.length === 0) return 'Edit'
+  if (JSON.stringify(prev.curves) !== JSON.stringify(cur.curves)) changed.push('톤 커브')
+  if (JSON.stringify(prev.hsl) !== JSON.stringify(cur.hsl)) changed.push('색상별 조정')
+  if (JSON.stringify(prev.colorGrade) !== JSON.stringify(cur.colorGrade)) changed.push('영역별 색감')
+  if (JSON.stringify(prev.masks) !== JSON.stringify(cur.masks)) changed.push('부분 보정')
+  if (prev.crop !== cur.crop || prev.flipH !== cur.flipH || prev.flipV !== cur.flipV) changed.push('자르기')
+  if (changed.length === 0) return '보정'
   if (changed.length === 1) return changed[0]
   return `${changed[0]} +${changed.length - 1}`
 }
@@ -68,15 +68,15 @@ export function HistoryPanel(): JSX.Element {
       {/* Snapshots */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <span className="lx-eyebrow">Snapshots</span>
+          <span className="lx-eyebrow">보정 버전</span>
           <button
             onClick={() => setNaming((v) => !v)}
-            className="flex items-center gap-1 text-[10px] text-accent-soft transition-colors hover:text-accent"
+            className="flex items-center gap-1 text-[12px] text-accent-soft transition-colors hover:text-accent"
           >
             <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
               <path d="M6 2.5v7M2.5 6h7" />
             </svg>
-            New
+            새로 저장
           </button>
         </div>
         {naming && (
@@ -89,20 +89,20 @@ export function HistoryPanel(): JSX.Element {
                 if (e.key === 'Enter') commitName()
                 if (e.key === 'Escape') { setNaming(false); setDraft('') }
               }}
-              placeholder="Snapshot name…"
-              className="flex-1 rounded-control border border-glass bg-black/25 px-2 py-1 text-[11px] text-ink placeholder:text-faint focus:border-accent/60"
+              placeholder="보정 버전 이름" aria-label="보정 버전 이름"
+              className="flex-1 rounded-control border border-glass bg-black/25 px-2 py-1 text-[12px] text-ink placeholder:text-faint focus:border-accent/60"
             />
             <button
               onClick={commitName}
-              className="rounded-control border border-accent/60 bg-accent/10 px-2.5 py-1 text-[11px] text-accent-soft transition-colors hover:bg-accent/[0.16]"
+              className="rounded-control border border-accent/60 bg-accent/10 px-2.5 py-1 text-[12px] text-accent-soft transition-colors hover:bg-accent/[0.16]"
             >
-              Save
+              저장
             </button>
           </div>
         )}
         {snapshots.length === 0 && !naming ? (
-          <p className="text-[10.5px] leading-relaxed text-faint">
-            Save the current look as a snapshot to compare variations.
+          <p className="text-[12px] leading-relaxed text-faint">
+            현재 보정을 보정 버전으로 저장해 여러 버전을 비교하세요. 보정 버전은 앱을 닫기 전까지 유지됩니다.
           </p>
         ) : (
           <div className="space-y-1">
@@ -121,7 +121,7 @@ export function HistoryPanel(): JSX.Element {
 
       {/* History */}
       <div className="space-y-2">
-        <span className="lx-eyebrow">History</span>
+        <span className="lx-eyebrow">보정 기록</span>
         <div className="max-h-52 space-y-0.5 overflow-y-auto pr-0.5">
           {timeline
             .slice()
@@ -130,7 +130,7 @@ export function HistoryPanel(): JSX.Element {
               <button
                 key={step.index}
                 onClick={() => jumpToHistory(step.index)}
-                className={`flex w-full items-center gap-2 rounded-control px-2 py-1 text-left text-[11px] transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-control px-2 py-1 text-left text-[12px] transition-colors ${
                   step.current ? 'bg-accent/[0.09] text-accent-soft' : 'text-muted hover:bg-white/[0.04] hover:text-ink'
                 }`}
               >
@@ -138,7 +138,7 @@ export function HistoryPanel(): JSX.Element {
                   className={`h-1.5 w-1.5 shrink-0 rounded-full ${step.current ? 'bg-accent' : 'bg-white/25'}`}
                 />
                 <span className="flex-1 truncate">{step.label}</span>
-                <span className="lx-num text-[9px] text-faint">{step.index}</span>
+                <span className="lx-num text-[12px] text-faint">{step.index}</span>
               </button>
             ))}
         </div>
@@ -172,28 +172,28 @@ function SnapshotRow({
             if (e.key === 'Enter') { onRename(draft.trim() || name); setEditing(false) }
             if (e.key === 'Escape') { setDraft(name); setEditing(false) }
           }}
-          className="flex-1 rounded border border-accent/40 bg-black/30 px-1.5 py-0.5 text-[11px] text-ink focus:border-accent/60"
+          className="flex-1 rounded border border-accent/40 bg-black/30 px-1.5 py-0.5 text-[12px] text-ink focus:border-accent/60"
         />
       ) : (
-        <button onClick={onApply} title="Apply snapshot" className="flex flex-1 items-center gap-2 text-left">
+        <button onClick={onApply} title="보정 버전 적용" className="flex flex-1 items-center gap-2 text-left">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="text-muted">
             <rect x="2.5" y="2.5" width="11" height="11" rx="2" />
             <path d="M2.5 6.5h11" />
           </svg>
-          <span className="truncate text-[11.5px] text-muted">{name}</span>
+          <span className="truncate text-[12px] text-muted">{name}</span>
         </button>
       )}
       <button
         onClick={() => setEditing(true)}
-        title="Rename"
-        className="text-[10px] text-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+        title="이름 바꾸기"
+        className="text-[12px] text-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100 focus:opacity-100"
       >
         ✎
       </button>
       <button
         onClick={onDelete}
-        title="Delete snapshot"
-        className="text-[11px] text-faint opacity-0 transition-opacity hover:text-accent-soft group-hover:opacity-100"
+        title="보정 버전 삭제"
+        className="text-[12px] text-faint opacity-0 transition-opacity hover:text-accent-soft group-hover:opacity-100 focus:opacity-100"
       >
         ✕
       </button>

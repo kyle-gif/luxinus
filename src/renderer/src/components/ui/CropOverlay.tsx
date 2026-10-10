@@ -1,6 +1,7 @@
 import { useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useStore } from '../../store/useStore'
 import type { CropRect } from '../../types'
+import { useEditGesture } from '../../lib/useEditGesture'
 
 // Interactive crop rectangle, laid over the (uncropped) image while crop mode is
 // active. The rect is stored normalized 0..1 in the straightened-image space —
@@ -24,6 +25,7 @@ export function CropOverlay({ imgAspect }: Props): JSX.Element {
   const setEdit = useStore((s) => s.setEdit)
   const cropAspect = useStore((s) => s.cropAspect)
   const drag = useRef<{ handle: Handle; sx: number; sy: number; rect: CropRect } | null>(null)
+  const gesture = useEditGesture()
 
   // Locked ratio expressed in normalized space (the frame is squished by imgAspect).
   const normAspect = cropAspect ? cropAspect / imgAspect : null
@@ -35,6 +37,7 @@ export function CropOverlay({ imgAspect }: Props): JSX.Element {
 
   function begin(handle: Handle) {
     return (e: ReactPointerEvent<HTMLDivElement>): void => {
+      if (!gesture.begin()) return
       e.stopPropagation()
       const [sx, sy] = toNorm(e)
       drag.current = { handle, sx, sy, rect: crop }
@@ -44,7 +47,7 @@ export function CropOverlay({ imgAspect }: Props): JSX.Element {
 
   function onMove(e: ReactPointerEvent<HTMLDivElement>): void {
     const d = drag.current
-    if (!d) return
+    if (!d || !gesture.isActive()) return
     const [nx, ny] = toNorm(e)
     const { handle, sx, sy, rect } = d
 
@@ -118,7 +121,8 @@ export function CropOverlay({ imgAspect }: Props): JSX.Element {
 
   function onUp(e: ReactPointerEvent<HTMLDivElement>): void {
     drag.current = null
-    rootRef.current?.releasePointerCapture?.(e.pointerId)
+    gesture.end()
+    if (rootRef.current?.hasPointerCapture(e.pointerId)) rootRef.current.releasePointerCapture(e.pointerId)
   }
 
   const pct = (v: number): string => `${v * 100}%`
@@ -135,6 +139,8 @@ export function CropOverlay({ imgAspect }: Props): JSX.Element {
       className="absolute inset-0 z-10 touch-none select-none"
       onPointerMove={onMove}
       onPointerUp={onUp}
+      onPointerCancel={onUp}
+      onLostPointerCapture={onUp}
     >
       {/* Scrim over everything outside the crop (four bands). */}
       <div className="pointer-events-none absolute inset-0">

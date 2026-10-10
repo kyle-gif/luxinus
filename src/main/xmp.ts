@@ -1,4 +1,4 @@
-import { XMLParser } from 'fast-xml-parser'
+import { XMLParser, XMLValidator } from 'fast-xml-parser'
 import { HSL_BANDS, type CurvePoint, type EditState, type HslBand } from '../shared/edits'
 import { presetBaseEdits, type XmpImportResult } from '../shared/presets'
 
@@ -9,8 +9,18 @@ import { presetBaseEdits, type XmpImportResult } from '../shared/presets'
 const clamp = (v: number, lo = -100, hi = 100): number => Math.max(lo, Math.min(hi, v))
 const num = (v: unknown): number | null => {
   if (v == null) return null
-  const n = parseFloat(String(v))
-  return isNaN(n) ? null : n
+  const raw = String(v).trim()
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(raw)) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+export function validateXmpXml(xml: string): void {
+  if (typeof xml !== 'string' || Buffer.byteLength(xml, 'utf8') > 4 * 1024 * 1024) throw new Error('XMP는 4 MB 이하의 UTF-8 문서여야 합니다.')
+  if (/<!\s*(?:DOCTYPE|ENTITY)\b/i.test(xml)) throw new Error('XMP의 DTD 및 외부 엔티티는 허용되지 않습니다.')
+  if (/\u0000/.test(xml) || /<\?xml[^>]*encoding\s*=\s*['"](?!utf-8['"]|utf8['"])[^'"]+['"]/i.test(xml)) throw new Error('UTF-8 XMP만 지원합니다. 원문을 보존했습니다.')
+  const checked = XMLValidator.validate(xml)
+  if (checked !== true) throw new Error(`XMP 문법 오류: ${checked.err.msg} (${checked.err.line}:${checked.err.col})`)
 }
 
 // crs color-adjustment suffixes → our HSL bands.
@@ -27,11 +37,10 @@ const HSL_COLORS: { xmp: string; band: HslBand }[] = [
 
 // crs: keys that are structural/meta — never surfaced as "ignored".
 const META_KEYS = new Set([
-  'Version', 'ProcessVersion', 'WhiteBalance', 'Name', 'ShortName', 'SortName',
+  'Version', 'ProcessVersion', 'Name', 'ShortName', 'SortName',
   'Group', 'RawFileName', 'HasSettings', 'HasCrop', 'AlreadyApplied', 'uuid',
   'SupportsAmount', 'SupportsColor', 'SupportsMonochrome', 'SupportsHighDynamicRange',
   'SupportsNormalDynamicRange', 'SupportsSceneReferred', 'SupportsOutputReferred',
-  'CameraProfile', 'CameraProfileDigest', 'Look', 'ToneCurveName', 'ToneCurveName2012',
   'ClipboardOrientation', 'ClipboardAspectRatio'
 ])
 
@@ -52,28 +61,42 @@ function parsePoints(seq: unknown): CurvePoint[] | null {
 }
 
 export function importXmp(xml: string, fallbackName: string): XmpImportResult {
+  validateXmpXml(xml)
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '',
     removeNSPrefix: false,
-    parseAttributeValue: false
+    parseAttributeValue: false,
+    processEntities: false
   })
   const doc = parser.parse(xml)
 
-  // Find rdf:Description (may be nested / an array).
-  const rdf = doc?.['x:xmpmeta']?.['rdf:RDF'] ?? doc?.['xmpmeta']?.['RDF'] ?? doc?.['rdf:RDF']
-  let desc = rdf?.['rdf:Description'] ?? rdf?.['Description']
-  if (Array.isArray(desc)) desc = Object.assign({}, ...desc)
-  if (!desc || typeof desc !== 'object') {
-    throw new Error('Not a valid XMP file (no rdf:Description found).')
-  }
-  const d = desc as Record<string, unknown>
-
-  // Collect crs: entries (attributes appear as 'crs:Key', children too).
+  // Resolve namespace URIs instead of treating a familiar prefix as authority.
+  // A vendor may bind "crs" to a different schema, or use another prefix for CRS.
   const crs: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(d)) {
-    if (k.startsWith('crs:')) crs[k.slice(4)] = v
+  let descriptions = 0
+  const visit = (name: string, value: unknown, inherited: Record<string, string>, depth: number): void => {
+    if (depth > 32) throw new Error('XMP 구조가 너무 깊습니다.')
+    if (Array.isArray(value)) { value.forEach((item) => visit(name, item, inherited, depth)); return }
+    if (!value || typeof value !== 'object') return
+    const object = value as Record<string, unknown>
+    const namespaces = { ...inherited }
+    for (const [key, entry] of Object.entries(object)) if (key.startsWith('xmlns:') && typeof entry === 'string') namespaces[key.slice(6)] = entry
+    const [prefix, local] = name.split(':')
+    if (local === 'Description' && namespaces[prefix] === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#') {
+      descriptions++
+      for (const [key, entry] of Object.entries(object)) {
+        const [attributePrefix, field] = key.split(':')
+        if (field && namespaces[attributePrefix] === 'http://ns.adobe.com/camera-raw-settings/1.0/') {
+          if (field in crs) throw new Error(`중복 XMP 보정 항목은 가져올 수 없습니다: ${field}`)
+          crs[field] = entry
+        }
+      }
+    }
+    for (const [key, entry] of Object.entries(object)) if (!key.startsWith('xmlns:')) visit(key, entry, namespaces, depth + 1)
   }
+  visit('', doc, {}, 0)
+  if (!descriptions) throw new Error('유효한 RDF namespace의 rdf:Description을 찾을 수 없습니다.')
   const get = (key: string): unknown => crs[key]
 
   const edits = presetBaseEdits()

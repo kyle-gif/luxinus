@@ -235,7 +235,7 @@ async function walk(dir: string, out: RawEntry[], depth: number): Promise<void> 
         fileName: c.name,
         ext: c.ext.toLowerCase(),
         isRaw: isRawExt(c.ext),
-        mtimeMs: Math.round(st.mtimeMs),
+        mtimeMs: st.mtimeMs,
         size: st.size
       })
     }

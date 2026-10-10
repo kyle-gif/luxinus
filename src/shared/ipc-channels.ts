@@ -1,14 +1,15 @@
 // Single source of truth for IPC channel names and their payload/return types.
 // Shared by main (handlers), preload (bridge), and renderer (typed window.luxinus).
 //
-// LOCAL-ONLY CONTRACT: none of these channels transmit data off-device. The only
-// network-capable channel is an *optional*, user-initiated update check that sends
-// no user data.
+// Photo operations and local AI run on-device. Codex login and an explicitly
+// selected Codex proposal use the official CLI; no automatic cloud fallback.
 
 export const IpcChannels = {
   app: {
     getVersion: 'app:getVersion',
-    getPlatformInfo: 'app:getPlatformInfo'
+    getPlatformInfo: 'app:getPlatformInfo',
+    prepareClose: 'app:prepareClose',
+    closeResult: 'app:closeResult'
   },
   library: {
     openFolder: 'library:openFolder', // native folder picker + recursive scan
@@ -23,6 +24,7 @@ export const IpcChannels = {
     editedList: 'edits:editedList' // which of these files have a sidecar
   },
   exportr: {
+    cancel: 'export:cancel',
     pickDir: 'export:pickDir', // choose destination folder
     run: 'export:run', // render + encode + write a batch
     progress: 'export:progress' // main → renderer batch progress
@@ -34,10 +36,18 @@ export const IpcChannels = {
     importXmp: 'presets:importXmp' // pick + parse a Lightroom .xmp
   },
   ai: {
+    restorePreview: 'ai:restorePreview', // persist and reuse a scoped restoration preview
+    cancel: 'ai:cancel',
     denoise: 'ai:denoise', // run NAFNet denoise on RGBA pixels (utility process)
     status: 'ai:status', // is a model present / which execution provider
     progress: 'ai:progress' // main → renderer inference progress (0..1)
   },
+  xmp: { open: 'xmp:open', propose: 'xmp:propose', apply: 'xmp:apply', undo: 'xmp:undo' },
+  portrait: { status: 'portrait:status', analyze: 'portrait:analyze', cancel: 'portrait:cancel' },
+  codex: { status: 'codex:status', login: 'codex:login', cancelLogin: 'codex:cancelLogin', logout: 'codex:logout', models: 'codex:models' },
+  localAgent: { status: 'localAgent:status', pickRuntime: 'localAgent:pickRuntime', pickModel: 'localAgent:pickModel', smokeTest: 'localAgent:smokeTest', unload: 'localAgent:unload', propose: 'localAgent:propose', cancel: 'localAgent:cancel', approve: 'localAgent:approve',
+    chat: 'localAgent:chat', approveChat: 'localAgent:approveChat', pickImages: 'localAgent:pickImages', prepareImage: 'localAgent:prepareImage', releaseImages: 'localAgent:releaseImages',
+    captureRequest: 'localAgent:captureRequest', captureResult: 'localAgent:captureResult', toolProgress: 'localAgent:toolProgress' },
   update: {
     check: 'update:check' // optional, user-initiated; sends no user data
   }

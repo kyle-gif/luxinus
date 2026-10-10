@@ -1,7 +1,7 @@
 {
   "name": "luxinus",
   "version": "0.1.0",
-  "description": "Luxinus — a fully local, on-device AI photo editor (Lightroom alternative). Photo data never leaves the machine.",
+  "description": "Luxinus — a local photo editor with optional ChatGPT Codex image chat and editing tools.",
   "author": "Luxinus",
   "license": "UNLICENSED",
   "private": true,
@@ -17,7 +17,15 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "dist": "electron-vite build && electron-builder",
     "dist:mac": "electron-vite build && electron-builder --mac",
-    "dist:win": "electron-vite build && electron-builder --win"
+    "dist:win": "electron-vite build && electron-builder --win",
+    "test": "node scripts/test.cjs",
+    "test:onnx": "node scripts/smoke-onnx.cjs",
+    "test:electron": "electron scripts/electron-smoke.cjs",
+    "test:electron:restoration": "electron scripts/electron-restoration-smoke.cjs",
+    "test:electron:agent": "electron scripts/electron-agent-smoke.cjs",
+    "test:electron:codex": "electron scripts/electron-codex-smoke.cjs",
+    "test:electron:chat": "electron scripts/electron-chat-smoke.cjs",
+    "test:electron:viewport": "electron scripts/electron-viewport-smoke.cjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

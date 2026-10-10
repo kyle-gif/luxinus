@@ -2,6 +2,7 @@ import type { ColorGradeRegion, EditState, Mask } from '../../../shared/edits'
 import { COLOR_GRADE_REGIONS, HSL_BAND_HUE, HSL_BANDS } from '../../../shared/edits'
 import { buildCurveLut, curvesAreIdentity } from './curve'
 import { srgbToOklab } from './color'
+import { MAX_RENDERED_MASKS, semanticAtlasLayout } from './semanticAtlas'
 
 // HSL→RGB (h,s,l in 0..1) — mirror of the shader's, for CPU-side precompute.
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
@@ -76,23 +77,24 @@ uniform float uAspect;  // image w/h (for correct rotation about center)
 // Local-adjustment masks (radial + linear; parametric, applied after develop).
 // Brush masks are handled separately (they need a coverage texture).
 uniform int uMaskCount;
-uniform float uMKind[8];   // 0 radial, 1 linear, 2 brush, 3 lum range, 4 color range
-uniform vec4 uMGeoA[8];    // radial: cx,cy,rx,ry · linear: x1,y1,x2,y2
-uniform vec4 uMGeoB[8];    // radial: feather, invert, -, -
-uniform vec4 uMAdj0[8];    // exposure, contrast, highlights, shadows
-uniform vec4 uMAdj1[8];    // whites, blacks, temperature, tint
-uniform vec4 uMAdj2[8];    // saturation, clarity, -, -
+uniform float uMKind[16];   // 0 radial, 1 linear, 2 brush, 3 lum, 4 color, 5 semantic
+uniform vec4 uMGeoA[16];    // radial geometry / semantic atlas rect
+uniform vec4 uMGeoB[16];    // radial feather+invert / semantic inverse dimensions; z density
+uniform vec4 uMAdj0[16];    // exposure, contrast, highlights, shadows
+uniform vec4 uMAdj1[16];    // whites, blacks, temperature, tint
+uniform vec4 uMAdj2[16];    // saturation, clarity, -, -
 // Brush coverage: up to 4 brush masks packed one-per-channel into uBrushTex;
 // uMBrushSel selects a mask's channel (e.g. (1,0,0,0)) so dot() reads it.
 uniform sampler2D uBrushTex;
-uniform vec4 uMBrushSel[8];
+uniform vec4 uMBrushSel[16];
+uniform sampler2D uSemanticTex;
 // Refinements: a shared pool of source-evaluated components (lum/color range)
 // combined onto a mask's primary shape. Per mask, uMRefine = (poolStart, count).
 // uRMeta = (kind 3|4, mode 0 add/1 subtract/2 intersect, invert, -).
 uniform vec4 uRMeta[8];
 uniform vec4 uRGeoA[8];
 uniform vec4 uRGeoB[8];
-uniform vec2 uMRefine[8];
+uniform vec2 uMRefine[16];
 uniform int uMaskPreview; // slot to show as a coverage overlay, or -1
 uniform int uOverlayMode; // 0 red · 1 white-on-black · 2 black-on-white
 uniform int uShowClip;    // 1 = zebra-stripe clipped pixels (red blown · blue crushed)
@@ -202,7 +204,7 @@ vec3 hsl2rgb(vec3 hsl) {
 }
 
 // Map view uv → source texel coord, applying crop, straighten, and flips.
-vec2 mapCoord(vec2 uv) {
+vec2 mapUnclampedCoord(vec2 uv) {
   vec2 c = uCrop.xy + uv * uCrop.zw;
   if (abs(uRotate) > 0.0001) {
     vec2 p = (c - 0.5) * vec2(uAspect, 1.0);
@@ -212,8 +214,9 @@ vec2 mapCoord(vec2 uv) {
     p /= cover;
     c = p / vec2(uAspect, 1.0) + 0.5;
   }
-  return clamp(vec2(uFlip.x < 0.0 ? 1.0 - c.x : c.x, uFlip.y < 0.0 ? 1.0 - c.y : c.y), 0.0, 1.0);
+  return vec2(uFlip.x < 0.0 ? 1.0 - c.x : c.x, uFlip.y < 0.0 ? 1.0 - c.y : c.y);
 }
+vec2 mapCoord(vec2 uv) { return clamp(mapUnclampedCoord(uv), 0.0, 1.0); }
 
 // The true original source (no denoise) — used by before/after compare.
 vec3 sampleImg(vec2 uv) {
@@ -311,7 +314,7 @@ float rangeShape(float kindV, vec4 ga, vec4 gb, vec2 uv) {
 // Coverage of mask i at uv (0..1), in the displayed (post-crop) view space:
 // primary shape → refinements (add = union, subtract, intersect) → density.
 float maskWeight(int i, vec2 uv) {
-  for (int k = 0; k < 8; k++) {
+  for (int k = 0; k < 16; k++) {
     if (k != i) continue;
     vec4 g = uMGeoA[k];
     float w = 0.0;
@@ -330,10 +333,17 @@ float maskWeight(int i, vec2 uv) {
     } else if (uMKind[k] < 2.5) {
       // Brush: coverage from the packed brush texture channel.
       w = clamp(dot(texture2D(uBrushTex, uv), uMBrushSel[k]), 0.0, 1.0);
-    } else {
+    } else if (uMKind[k] < 4.5) {
       // Luminance / color range, evaluated on the pre-develop source so
       // coverage doesn't shift while the mask's own adjustments are dragged.
       w = rangeShape(uMKind[k], g, uMGeoB[k], uv);
+    } else {
+      vec2 sourceUV = mapUnclampedCoord(uv);
+      if (sourceUV.x >= 0.0 && sourceUV.x <= 1.0 && sourceUV.y >= 0.0 && sourceUV.y <= 1.0) {
+        vec2 halfTexel = 0.5 * uMGeoB[k].xy;
+        vec2 sampleUV = clamp(sourceUV, halfTexel, vec2(1.0) - halfTexel);
+        w = texture2D(uSemanticTex, g.xy + sampleUV * g.zw).r;
+      }
     }
 
     // Fold in this mask's refinement components from the shared pool.
@@ -358,7 +368,7 @@ vec3 applyLocalMask(int i, vec3 c, float hi, vec2 uv) {
   float w = maskWeight(i, uv);
   if (w <= 0.0) return c;
   vec4 a0 = vec4(0.0), a1 = vec4(0.0), a2 = vec4(0.0);
-  for (int k = 0; k < 8; k++) {
+  for (int k = 0; k < 16; k++) {
     if (k == i) { a0 = uMAdj0[k]; a1 = uMAdj1[k]; a2 = uMAdj2[k]; }
   }
   // The SAME primitives as the global pass, with strengths scaled by coverage.
@@ -401,7 +411,7 @@ void main() {
   }
 
   // Local-adjustment masks, composited over the globally-developed image.
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 16; i++) {
     if (i >= uMaskCount) break;
     col = applyLocalMask(i, col, hi, vUv);
   }
@@ -473,7 +483,7 @@ export const EDIT_UNIFORMS = [
   'uCgSh', 'uCgMid', 'uCgHi', 'uCgGlobal', 'uCgParams', 'uCgActive', 'uCompare', 'uSplit',
   'uCrop', 'uFlip', 'uRotate', 'uAspect',
   'uMaskCount', 'uMKind', 'uMGeoA', 'uMGeoB', 'uMAdj0', 'uMAdj1', 'uMAdj2',
-  'uBrushTex', 'uMBrushSel', 'uRMeta', 'uRGeoA', 'uRGeoB', 'uMRefine', 'uMaskPreview', 'uOverlayMode', 'uShowClip', 'uNeedHi',
+  'uBrushTex', 'uSemanticTex', 'uMBrushSel', 'uRMeta', 'uRGeoA', 'uRGeoB', 'uMRefine', 'uMaskPreview', 'uOverlayMode', 'uShowClip', 'uNeedHi',
   'uDenoiseTex', 'uDenoiseAmt', 'uHasDenoise'
 ] as const
 
@@ -707,7 +717,7 @@ export function setEditUniforms(
   gl.uniform1f(U.uNeedHi, needHi ? 1 : 0)
 }
 
-const MAX_MASKS = 8
+const MAX_MASKS = MAX_RENDERED_MASKS
 const MAX_REFINE = 8 // shared refinement pool across all masks
 export const MAX_BRUSH_MASKS = 4 // one per RGBA channel of the packed brush texture
 
@@ -726,7 +736,8 @@ export function maskSlotIndex(e: EditState, id: string | null): number {
       (m.kind === 'linear' && m.linear) ||
       (m.kind === 'brush' && m.brush && brushIds.has(m.id)) ||
       (m.kind === 'lumRange' && m.lum) ||
-      (m.kind === 'colorRange' && m.color)
+      (m.kind === 'colorRange' && m.color) ||
+      (m.kind === 'semantic' && m.semantic)
     if (!valid) continue
     if (m.id === id) return n
     n++
@@ -768,6 +779,7 @@ function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditS
   let pool = 0
   const brushChannel = new Map<string, number>()
   for (const { mask, channel } of assignBrushChannels(e)) brushChannel.set(mask.id, channel)
+  const semanticRects = new Map(semanticAtlasLayout(e).tiles.map(tile => [tile.mask.id, tile.rect]))
 
   let n = 0
   for (const m of e.masks ?? []) {
@@ -806,6 +818,11 @@ function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditS
       // ~0.35 (distinct hues sit ~0.1–0.3 apart), feather up to ~0.25.
       geoA[n * 4 + 3] = m.color.tolerance * 0.35
       geoB[n * 4] = Math.max(m.color.feather * 0.25, 0.004)
+    } else if (m.kind === 'semantic' && m.semantic && semanticRects.has(m.id)) {
+      kind[n] = 5
+      geoA.set(semanticRects.get(m.id)!, n * 4)
+      geoB[n * 4] = 1 / m.semantic.width
+      geoB[n * 4 + 1] = 1 / m.semantic.height
     } else {
       continue // malformed / over the brush cap — skip
     }
@@ -869,6 +886,7 @@ function uploadMaskUniforms(gl: WebGLRenderingContext, U: EditUniforms, e: EditS
   gl.uniform4fv(U.uRGeoB, rGeoB)
   gl.uniform2fv(U.uMRefine, mRefine)
   gl.uniform1i(U.uBrushTex, 2) // texture unit 2
+  gl.uniform1i(U.uSemanticTex, 4)
   return needHi
 }
 
